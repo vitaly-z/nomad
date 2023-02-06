@@ -5,10 +5,10 @@ job "csi-plugin" {
   group "csi" {
 
     task "plugin" {
-      driver = "docker"
+      driver = "podman"
 
       config {
-        image = "quay.io/k8scsi/hostpathplugin:v1.2.0"
+        image = "docker://quay.io/k8scsi/hostpathplugin:v1.2.0"
 
         args = [
           "--drivername=csi-hostpath",

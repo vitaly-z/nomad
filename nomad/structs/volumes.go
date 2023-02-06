@@ -214,6 +214,7 @@ type VolumeMount struct {
 	Destination     string
 	ReadOnly        bool
 	PropagationMode string
+	SELinuxLabel    string
 }
 
 func (v *VolumeMount) Copy() *VolumeMount {

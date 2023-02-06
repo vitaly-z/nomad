@@ -419,6 +419,7 @@ type VolumeMount struct {
 	Destination     *string `hcl:"destination,optional"`
 	ReadOnly        *bool   `mapstructure:"read_only" hcl:"read_only,optional"`
 	PropagationMode *string `mapstructure:"propagation_mode" hcl:"propagation_mode,optional"`
+	SELinuxLabel    *string `mapstructure:"selinux_label" hcl:"selinux_label,optional"`
 }
 
 func (vm *VolumeMount) Canonicalize() {
@@ -427,6 +428,9 @@ func (vm *VolumeMount) Canonicalize() {
 	}
 	if vm.ReadOnly == nil {
 		vm.ReadOnly = pointerOf(false)
+	}
+	if vm.SELinuxLabel == nil {
+		vm.SELinuxLabel = pointerOf("")
 	}
 }
 
