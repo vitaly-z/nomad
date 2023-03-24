@@ -11,6 +11,11 @@ import (
 	"time"
 
 	memdb "github.com/hashicorp/go-memdb"
+	"github.com/shoenig/test/must"
+	"github.com/shoenig/test/wait"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/hashicorp/nomad/ci"
 	trstate "github.com/hashicorp/nomad/client/allocrunner/taskrunner/state"
 	"github.com/hashicorp/nomad/client/config"
@@ -30,8 +35,6 @@ import (
 	"github.com/hashicorp/nomad/plugins/device"
 	psstructs "github.com/hashicorp/nomad/plugins/shared/structs"
 	"github.com/hashicorp/nomad/testutil"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 func testACLServer(t *testing.T, cb func(*nomad.Config)) (*nomad.Server, string, *structs.ACLToken, func()) {
@@ -575,36 +578,35 @@ func TestClient_SaveRestoreState(t *testing.T) {
 	alloc1.ClientStatus = structs.AllocClientStatusRunning
 
 	state := s1.State()
-	if err := state.UpsertJob(structs.MsgTypeTestSetup, 100, job); err != nil {
-		t.Fatal(err)
-	}
-	if err := state.UpsertJobSummary(101, mock.JobSummary(alloc1.JobID)); err != nil {
-		t.Fatal(err)
-	}
-	if err := state.UpsertAllocs(structs.MsgTypeTestSetup, 102, []*structs.Allocation{alloc1}); err != nil {
-		t.Fatalf("err: %v", err)
-	}
+	must.NoError(t, state.UpsertJob(structs.MsgTypeTestSetup, 100, job))
+	must.NoError(t, state.UpsertJobSummary(101, mock.JobSummary(alloc1.JobID)))
+	must.NoError(t, state.UpsertAllocs(structs.MsgTypeTestSetup, 102, []*structs.Allocation{alloc1}))
 
 	// Allocations should get registered
-	testutil.WaitForResult(func() (bool, error) {
-		c1.allocLock.RLock()
-		ar := c1.allocs[alloc1.ID]
-		c1.allocLock.RUnlock()
-		if ar == nil {
-			return false, fmt.Errorf("nil alloc runner")
-		}
-		if ar.Alloc().ClientStatus != structs.AllocClientStatusRunning {
-			return false, fmt.Errorf("client status: got %v; want %v", ar.Alloc().ClientStatus, structs.AllocClientStatusRunning)
-		}
-		return true, nil
-	}, func(err error) {
-		t.Fatalf("err: %v", err)
-	})
+	must.Wait(t, wait.InitialSuccess(
+		wait.ErrorFunc(func() error {
+			c1.allocLock.RLock()
+			defer c1.allocLock.RUnlock()
+
+			ar := c1.allocs[alloc1.ID]
+			if ar == nil {
+				return fmt.Errorf("nil alloc runner")
+			}
+			if ar.Alloc().ClientStatus != structs.AllocClientStatusRunning {
+				return fmt.Errorf("client status: got %v; want %v",
+					ar.Alloc().ClientStatus, structs.AllocClientStatusRunning)
+			}
+			return nil
+		}),
+		wait.Timeout(2*time.Second),
+		wait.Gap(10*time.Millisecond),
+	))
+
+	corruptAlloc := mock.Alloc()
+	c1.stateDB.PutAllocation(corruptAlloc)
 
 	// Shutdown the client, saves state
-	if err := c1.Shutdown(); err != nil {
-		t.Fatalf("err: %v", err)
-	}
+	must.NoError(t, c1.Shutdown())
 
 	// Create a new client
 	logger := testlog.HCLogger(t)
@@ -617,25 +619,32 @@ func TestClient_SaveRestoreState(t *testing.T) {
 	c1.config.PluginSingletonLoader = singleton.NewSingletonLoader(logger, c1.config.PluginLoader)
 
 	c2, err := NewClient(c1.config, consulCatalog, nil, mockService, nil)
-	if err != nil {
-		t.Fatalf("err: %v", err)
-	}
+	must.NoError(t, err)
 	defer c2.Shutdown()
 
 	// Ensure the allocation is running
-	testutil.WaitForResult(func() (bool, error) {
-		c2.allocLock.RLock()
-		ar := c2.allocs[alloc1.ID]
-		c2.allocLock.RUnlock()
-		status := ar.Alloc().ClientStatus
-		alive := status == structs.AllocClientStatusRunning || status == structs.AllocClientStatusPending
-		if !alive {
-			return false, fmt.Errorf("incorrect client status: %#v", ar.Alloc())
-		}
-		return true, nil
-	}, func(err error) {
-		t.Fatalf("err: %v", err)
-	})
+	must.Wait(t, wait.InitialSuccess(
+		wait.ErrorFunc(func() error {
+			c2.allocLock.RLock()
+			defer c2.allocLock.RUnlock()
+
+			_, corruptStillLives := c2.allocs[corruptAlloc.ID]
+			if corruptStillLives {
+				return fmt.Errorf("corrupted allocation should not have been restored")
+			}
+
+			ar := c2.allocs[alloc1.ID]
+
+			status := ar.Alloc().ClientStatus
+			alive := status == structs.AllocClientStatusRunning || status == structs.AllocClientStatusPending
+			if !alive {
+				return fmt.Errorf("incorrect client status: %#v", ar.Alloc())
+			}
+			return nil
+		}),
+		wait.Timeout(2*time.Second),
+		wait.Gap(10*time.Millisecond),
+	))
 
 	// Destroy all the allocations
 	for _, ar := range c2.getAllocRunners() {

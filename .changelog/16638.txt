@@ -1,0 +1,3 @@
+```release-note:improvement
+client: remove incomplete allocation entries from client state database during client restarts
+```
