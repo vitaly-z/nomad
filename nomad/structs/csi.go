@@ -817,20 +817,6 @@ func (v *CSIVolume) Merge(other *CSIVolume) error {
 			"volume snapshot ID cannot be updated"))
 	}
 
-	// must be compatible with capacity range
-	// TODO: when ExpandVolume is implemented we'll need to update
-	// this logic https://github.com/hashicorp/nomad/issues/10324
-	if v.Capacity != 0 {
-		if other.RequestedCapacityMax < v.Capacity ||
-			other.RequestedCapacityMin > v.Capacity {
-			errs = multierror.Append(errs, errors.New(
-				"volume requested capacity update was not compatible with existing capacity"))
-		} else {
-			v.RequestedCapacityMin = other.RequestedCapacityMin
-			v.RequestedCapacityMax = other.RequestedCapacityMax
-		}
-	}
-
 	// must be compatible with volume_capabilities
 	if v.AccessMode != CSIVolumeAccessModeUnknown ||
 		v.AttachmentMode != CSIVolumeAttachmentModeUnknown {
@@ -879,6 +865,20 @@ func (v *CSIVolume) Merge(other *CSIVolume) error {
 	// validation
 	v.Context = other.Context
 	return errs.ErrorOrNil()
+}
+
+// MergeWhileInUse updates fields that may be mutated while the volume is in use.
+func (v *CSIVolume) MergeWhileInUse(other *CSIVolume) error {
+	if v == nil || other == nil {
+		return nil // TODO: error?
+	}
+
+	// Expand operation can sometimes happen while in-use.
+	v.Capacity = other.Capacity
+	v.RequestedCapacityMin = other.RequestedCapacityMin
+	v.RequestedCapacityMax = other.RequestedCapacityMax
+
+	return nil
 }
 
 // Request and response wrappers

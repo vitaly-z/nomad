@@ -501,7 +501,8 @@ func (r *ControllerCreateVolumeRequest) Validate() error {
 			return errors.New(
 				"one of LimitBytes or RequiredBytes must be set if CapacityRange is set")
 		}
-		if r.CapacityRange.LimitBytes < r.CapacityRange.RequiredBytes {
+		if r.CapacityRange.LimitBytes > 0 &&
+			r.CapacityRange.LimitBytes < r.CapacityRange.RequiredBytes {
 			return errors.New("LimitBytes cannot be less than RequiredBytes")
 		}
 	}

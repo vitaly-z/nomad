@@ -1694,7 +1694,6 @@ func TestCSIVolumeEndpoint_Expand(t *testing.T) {
 	cases := []struct {
 		Name      string
 		VolumeID  string
-		ModifyReq func(request *structs.CSIVolumeExpandRequest)
 		MaxSize   int64
 		ExpectErr string
 	}{
@@ -1713,7 +1712,7 @@ func TestCSIVolumeEndpoint_Expand(t *testing.T) {
 			MaxSize:  2,
 			// this needs to run after the success case,
 			// which should have set a new larger Capacity on the volume.
-			ExpectErr: "max requested capacity (2 B) smaller than current (1.0 kB)",
+			ExpectErr: "max requested capacity (2 B) less than or equal to current (1.0 kB)",
 		},
 		{
 			Name:      "missing id",
