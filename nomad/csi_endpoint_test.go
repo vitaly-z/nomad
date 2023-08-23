@@ -24,6 +24,7 @@ import (
 	"github.com/hashicorp/nomad/nomad/mock"
 	"github.com/hashicorp/nomad/nomad/state"
 	"github.com/hashicorp/nomad/nomad/structs"
+	"github.com/hashicorp/nomad/plugins/csi"
 	"github.com/hashicorp/nomad/testutil"
 )
 
@@ -1675,7 +1676,7 @@ func TestCSIVolumeEndpoint_ListSnapshots(t *testing.T) {
 	require.Equal(t, "page2", resp.NextToken)
 }
 
-func TestCSIVolumeEndpoint_Expand(t *testing.T) {
+func TestCSIVolume_expandVolume(t *testing.T) {
 	ci.Parallel(t)
 
 	srv, cleanupSrv := TestServer(t, nil)
@@ -1684,137 +1685,134 @@ func TestCSIVolumeEndpoint_Expand(t *testing.T) {
 	t.Log("server started 👍")
 
 	_, fake, _, fakeVolID := testClientWithCSI(t, srv)
-	expectCapacity := int64(1024)
-	fake.NextControllerExpandVolumeResponse = &cstructs.ClientCSIControllerExpandVolumeResponse{
-		CapacityBytes:         expectCapacity,
-		NodeExpansionRequired: true,
-	}
 
-	// "Expand" the volume -- actual method under test.
+	endpoint := NewCSIVolumeEndpoint(srv, nil)
+	plug, vol, err := endpoint.volAndPluginLookup(structs.DefaultNamespace, fakeVolID)
+	must.NoError(t, err)
+
+	// ensure nil checks
+	expectErr := "unexpected nil value"
+	err = endpoint.expandVolume(nil, plug, &csi.CapacityRange{})
+	must.EqError(t, err, expectErr)
+	err = endpoint.expandVolume(vol, nil, &csi.CapacityRange{})
+	must.EqError(t, err, expectErr)
+	err = endpoint.expandVolume(vol, plug, nil)
+	must.EqError(t, err, expectErr)
+
+	// these tests must be run in order, as they mutate vol along the way
 	cases := []struct {
-		Name      string
-		VolumeID  string
-		MaxSize   int64
-		ExpectErr string
+		Name string
+
+		NewMin int64
+		NewMax int64
+
+		ExpectMin      int64
+		ExpectMax      int64
+		ControllerResp int64 // new capacity for the mock controller response
+		ExpectCapacity int64 // expected resulting capacity on the volume
+		ExpectErr      string
 	}{
 		{
-			Name:     "success",
-			VolumeID: fakeVolID,
+			// successful expansion from initial vol with no capacity values.
+			Name:   "success",
+			NewMin: 1000,
+			NewMax: 2000,
+
+			ExpectMin:      1000,
+			ExpectMax:      2000,
+			ControllerResp: 1000,
+			ExpectCapacity: 1000,
 		},
 		{
-			Name:     "good max size",
-			VolumeID: fakeVolID,
-			MaxSize:  2000,
+			// with min/max both zero, no action should be taken,
+			// so expect no change to desired or actual capacity on the volume.
+			Name:   "zero",
+			NewMin: 0,
+			NewMax: 0,
+
+			ExpectMin:      1000,
+			ExpectMax:      2000,
+			ControllerResp: 999999, // this should not come into play
+			ExpectCapacity: 1000,
 		},
 		{
-			Name:     "max too small",
-			VolumeID: fakeVolID,
-			MaxSize:  2,
-			// this needs to run after the success case,
-			// which should have set a new larger Capacity on the volume.
-			ExpectErr: "max requested capacity (2 B) less than or equal to current (1.0 kB)",
+			// increasing min is what actually triggers an expand to occur.
+			Name:   "increase min",
+			NewMin: 1500,
+			NewMax: 2000,
+
+			ExpectMin:      1500,
+			ExpectMax:      2000,
+			ControllerResp: 1500,
+			ExpectCapacity: 1500,
 		},
 		{
-			Name:      "missing id",
-			VolumeID:  "",
-			ExpectErr: "missing volume ID",
+			// min going down is okay, but no expand should occur.
+			Name:   "reduce min",
+			NewMin: 500,
+			NewMax: 2000,
+
+			ExpectMin:      500,
+			ExpectMax:      2000,
+			ControllerResp: 999999,
+			ExpectCapacity: 1500,
 		},
 		{
-			Name:      "volume not found",
-			VolumeID:  "not-exists",
-			ExpectErr: "volume not found: not-exists",
+			// max going up is okay, but no expand should occur.
+			Name:   "increase max",
+			NewMin: 500,
+			NewMax: 5000,
+
+			ExpectMin:      500,
+			ExpectMax:      5000,
+			ControllerResp: 999999,
+			ExpectCapacity: 1500,
+		},
+		{
+			// max lower than min is logically impossible.
+			Name:      "max below min",
+			NewMin:    3,
+			NewMax:    2,
+			ExpectErr: "max requested capacity (2 B) less than or equal to min (3 B)",
+		},
+		{
+			// volume size cannot be reduced.
+			Name:      "max below current",
+			NewMax:    2,
+			ExpectErr: "max requested capacity (2 B) less than or equal to current (1.5 kB)",
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.Name, func(t *testing.T) {
+			fake.NextControllerExpandVolumeResponse = &cstructs.ClientCSIControllerExpandVolumeResponse{
+				CapacityBytes:         tc.ControllerResp,
+				NodeExpansionRequired: true,
+			}
 
-			var resp structs.CSIVolumeExpandResponse
-			err := srv.RPC("CSIVolume.Expand", &structs.CSIVolumeExpandRequest{
-				VolumeID:             tc.VolumeID,
-				RequestedCapacityMax: tc.MaxSize,
-				Secrets:              map[string]string{"super": "secret"},
-				WriteRequest:         structs.WriteRequest{Region: srv.Region()},
-			}, &resp)
+			cp := vol.Copy()
+
+			err = endpoint.expandVolume(cp, plug, &csi.CapacityRange{
+				RequiredBytes: tc.NewMin,
+				LimitBytes:    tc.NewMax,
+			})
 
 			if tc.ExpectErr != "" {
 				must.EqError(t, err, tc.ExpectErr)
 				return
 			}
 
-			// response
 			must.NoError(t, err)
-			test.Eq(t, expectCapacity, resp.CapacityBytes)
 
-			// state
-			vol, err := srv.State().CSIVolumeByID(nil, structs.DefaultNamespace, fakeVolID)
-			must.NoError(t, err)
-			must.Eq(t, vol.Capacity, expectCapacity, must.Sprint("new capacity not set in state"))
-		})
-	}
+			test.Eq(t, tc.ExpectCapacity, cp.Capacity,
+				test.Sprint("unexpected capacity"))
+			test.Eq(t, tc.ExpectMin, cp.RequestedCapacityMin,
+				test.Sprint("unexpected min"))
+			test.Eq(t, tc.ExpectMax, cp.RequestedCapacityMax,
+				test.Sprint("unexpected max"))
 
-	// test ACLs
-	srv.config.ACLEnabled = true
-	ns := structs.DefaultNamespace
-	mgmtToken := mock.ACLManagementToken()
-	err := srv.State().BootstrapACLTokens(structs.MsgTypeTestSetup, 1, 0, mgmtToken)
-	must.NoError(t, err)
-
-	ACLcases := []struct {
-		Name      string
-		ExpectErr error
-		Policy    string
-	}{
-		{
-			Name: "good policy",
-			Policy: fmt.Sprintf("%s\n%s",
-				mock.NamespacePolicy(ns, "",
-					[]string{acl.NamespaceCapabilityCSIWriteVolume},
-				),
-				mock.PluginPolicy("read"),
-			),
-		},
-		{
-			Name:      "no csi-write-volume",
-			ExpectErr: structs.ErrPermissionDenied,
-			Policy: fmt.Sprintf("%s\n%s",
-				mock.NamespacePolicy(ns, "",
-					[]string{acl.NamespaceCapabilityCSIReadVolume},
-				),
-				mock.PluginPolicy("read"),
-			),
-		},
-		{
-			Name:      "no plugin read",
-			ExpectErr: structs.ErrPermissionDenied,
-			Policy: mock.NamespacePolicy(ns, "",
-				[]string{acl.NamespaceCapabilityCSIWriteVolume},
-			),
-		},
-	}
-
-	for _, tc := range ACLcases {
-		t.Run("ACL "+tc.Name, func(t *testing.T) {
-			idx, err := srv.State().LatestIndex() // bit racy, but ok
-			must.NoError(t, err)
-			t.Logf("%s policy:\n%s", t.Name(), tc.Policy)
-			token := mock.CreatePolicyAndToken(t, srv.State(), idx+1, t.Name(), tc.Policy).SecretID
-
-			var resp structs.CSIVolumeExpandResponse
-			err = srv.RPC("CSIVolume.Expand", &structs.CSIVolumeExpandRequest{
-				VolumeID: fakeVolID,
-				WriteRequest: structs.WriteRequest{
-					Region:    srv.Region(),
-					AuthToken: token,
-				},
-			}, &resp)
-
-			if tc.ExpectErr != nil {
-				must.EqError(t, err, tc.ExpectErr.Error())
-				return
-			}
-			must.NoError(t, err)
-			test.Eq(t, expectCapacity, resp.CapacityBytes)
+			// save for the next test to build upon
+			*vol = *cp
 		})
 	}
 
