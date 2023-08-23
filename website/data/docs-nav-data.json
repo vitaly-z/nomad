@@ -1114,10 +1114,6 @@
             "path": "commands/volume/detach"
           },
           {
-            "title": "expand",
-            "path": "commands/volume/expand"
-          },
-          {
             "title": "init",
             "path": "commands/volume/init"
           },

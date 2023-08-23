@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/url"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -131,23 +130,6 @@ func (v *CSIVolumes) DeleteOpts(req *CSIVolumeDeleteRequest, w *WriteOptions) er
 func (v *CSIVolumes) Detach(volID, nodeID string, w *WriteOptions) error {
 	_, err := v.client.delete(fmt.Sprintf("/v1/volume/csi/%v/detach?node=%v", url.PathEscape(volID), nodeID), nil, nil, w)
 	return err
-}
-
-// Expand increases the capacity of a CSI volume.
-func (v *CSIVolumes) Expand(req *CSIVolumeExpandRequest, w *WriteOptions) (*CSIVolumeExpandResponse, *WriteMeta, error) {
-	qp := url.Values{}
-	qp.Set("min_size", strconv.Itoa(int(req.RequestedCapacityMin)))
-	qp.Set("max_size", strconv.Itoa(int(req.RequestedCapacityMax)))
-	if w == nil {
-		w = &WriteOptions{}
-	}
-	w.SetHeadersFromCSISecrets(req.Secrets)
-	resp := &CSIVolumeExpandResponse{}
-	meta, err := v.client.put(
-		fmt.Sprintf("/v1/volume/csi/%v/expand?%v",
-			url.PathEscape(req.VolumeID), qp.Encode()),
-		req, resp, w)
-	return resp, meta, err
 }
 
 // CreateSnapshot snapshots an external storage volume.
@@ -480,18 +462,6 @@ type CSIVolumeDeleteRequest struct {
 	ExternalVolumeID string
 	Secrets          CSISecrets
 	WriteRequest
-}
-
-type CSIVolumeExpandRequest struct {
-	VolumeID             string
-	RequestedCapacityMin int64
-	RequestedCapacityMax int64
-	Secrets              CSISecrets
-}
-
-type CSIVolumeExpandResponse struct {
-	CapacityBytes int64
-	QueryMeta
 }
 
 // CSISnapshot is the storage provider's view of a volume snapshot

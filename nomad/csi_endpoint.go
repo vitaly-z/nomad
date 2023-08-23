@@ -1116,63 +1116,6 @@ func (v *CSIVolume) createVolume(vol *structs.CSIVolume, plugin *structs.CSIPlug
 	return nil
 }
 
-func (v *CSIVolume) Expand(args *structs.CSIVolumeExpandRequest, reply *structs.CSIVolumeExpandResponse) error {
-	authErr := v.srv.Authenticate(v.ctx, args)
-	if done, err := v.srv.forward("CSIVolume.Expand", args, args, reply); done {
-		return err
-	}
-	v.srv.MeasureRPCRate("csi_volume", structs.RateMetricWrite, args)
-	if authErr != nil {
-		return structs.ErrPermissionDenied
-	}
-	defer metrics.MeasureSince([]string{"nomad", "volume", "expand"}, time.Now())
-
-	allowVolume := acl.NamespaceValidator(acl.NamespaceCapabilityCSIWriteVolume)
-	aclObj, err := v.srv.ResolveACL(args)
-	if err != nil {
-		return err
-	}
-
-	if !allowVolume(aclObj, args.RequestNamespace()) || !aclObj.AllowPluginRead() {
-		return structs.ErrPermissionDenied
-	}
-
-	if args.VolumeID == "" {
-		return errors.New("missing volume ID")
-	}
-
-	plugin, vol, err := v.volAndPluginLookup(args.RequestNamespace(), args.VolumeID)
-	if err != nil {
-		return err
-	}
-	vol = vol.Copy() // don't mutate it in place in state
-
-	err = v.expandVolume(vol, plugin, &csi.CapacityRange{
-		RequiredBytes: args.RequestedCapacityMin,
-		LimitBytes:    args.RequestedCapacityMax,
-	})
-	if err != nil {
-		return err
-	}
-
-	reg := structs.CSIVolumeRegisterRequest{ // "register" will overwrite the volume
-		Volumes: []*structs.CSIVolume{vol},
-	}
-	_, idx, err := v.srv.raftApply(structs.CSIVolumeRegisterRequestType, reg)
-	if err != nil {
-		// this is not fatal for the operation, as the controller is the
-		// ultimate arbiter of success, but log if state doesn't get updated.
-		//v.logger.Error("error updating volume raft state", "error", err)
-		return err
-	}
-	vol.ModifyIndex = idx
-
-	reply.Index = idx
-	reply.CapacityBytes = vol.Capacity
-	v.srv.setQueryMeta(&reply.QueryMeta)
-	return nil
-}
-
 // expandVolume validates the requested capacity values and issues
 // ControllerExpandVolume (and NodeExpandVolume, if needed) to the CSI plugin,
 // via Nomad client RPC.
