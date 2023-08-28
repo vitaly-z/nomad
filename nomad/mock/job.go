@@ -1,5 +1,5 @@
 // Copyright (c) HashiCorp, Inc.
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: BUSL-1.1
 
 package mock
 
@@ -44,10 +44,11 @@ func Job() *structs.Job {
 					SizeMB: 150,
 				},
 				RestartPolicy: &structs.RestartPolicy{
-					Attempts: 3,
-					Interval: 10 * time.Minute,
-					Delay:    1 * time.Minute,
-					Mode:     structs.RestartPolicyModeDelay,
+					Attempts:        3,
+					Interval:        10 * time.Minute,
+					Delay:           1 * time.Minute,
+					Mode:            structs.RestartPolicyModeDelay,
+					RenderTemplates: false,
 				},
 				ReschedulePolicy: &structs.ReschedulePolicy{
 					Attempts:      2,

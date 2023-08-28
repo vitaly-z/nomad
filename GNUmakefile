@@ -44,7 +44,7 @@ PROTO_COMPARE_TAG ?= v1.0.3$(if $(findstring ent,$(GO_TAGS)),+ent,)
 
 # LAST_RELEASE is the git sha of the latest release corresponding to this branch. main should have the latest
 # published release, and release branches should point to the latest published release in the X.Y release line.
-LAST_RELEASE ?= v1.6.0
+LAST_RELEASE ?= v1.6.1
 
 default: help
 
@@ -53,6 +53,7 @@ ALL_TARGETS = linux_386 \
 	linux_amd64 \
 	linux_arm \
 	linux_arm64 \
+	linux_s390x \
 	windows_386 \
 	windows_amd64
 endif
@@ -138,11 +139,12 @@ deps:  ## Install build and development dependencies
 	go install github.com/hashicorp/go-changelog/cmd/changelog-build@latest
 	go install golang.org/x/tools/cmd/stringer@v0.1.12
 	go install github.com/hashicorp/hc-install/cmd/hc-install@v0.5.0
+	go install github.com/shoenig/go-modtool@v0.1.1
 
 .PHONY: lint-deps
 lint-deps: ## Install linter dependencies
 	@echo "==> Updating linter dependencies..."
-	go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.51.2
+	go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.54.0
 	go install github.com/client9/misspell/cmd/misspell@v0.3.4
 	go install github.com/hashicorp/go-hclog/hclogvet@v0.1.6
 
@@ -246,6 +248,10 @@ tidy: ## Tidy up the go mod files
 	@cd tools && go mod tidy
 	@cd api && go mod tidy
 	@echo "==> Tidy nomad module"
+	@go-modtool \
+		--replace-comment="Pinned dependencies are noted in github.com/hashicorp/nomad/issues/11826." \
+		--subs-comment="Nomad is built using the current source of the API module." \
+		-w fmt go.mod
 	@go mod tidy
 
 .PHONY: dev
@@ -311,13 +317,13 @@ e2e-test: dev ## Run the Nomad e2e test suite
 .PHONY: integration-test
 integration-test: dev ## Run Nomad integration tests
 	@echo "==> Running Nomad integration test suites:"
-	go test \
-		$(if $(ENABLE_RACE),-race) $(if $(VERBOSE),-v) \
-		-cover \
+	NOMAD_E2E_VAULTCOMPAT=1 go test \
+		-v \
+		-race \
 		-timeout=900s \
+		-count=1 \
 		-tags "$(GO_TAGS)" \
-		github.com/hashicorp/nomad/e2e/vaultcompat/ \
-		-integration
+		github.com/hashicorp/nomad/e2e/vaultcompat
 
 .PHONY: clean
 clean: GOPATH=$(shell go env GOPATH)
@@ -405,11 +411,6 @@ endif
 missing: ## Check for packages not being tested
 	@echo "==> Checking for packages not being tested ..."
 	@go run -modfile tools/go.mod tools/missing/main.go ci/test-core.json
-
-.PHONY: ec2info
-ec2info: ## Generate AWS EC2 CPU specification table
-	@echo "==> Generating AWS EC2 specifications ..."
-	@go run -modfile tools/go.mod tools/ec2info/main.go
 
 .PHONY: cl
 cl: ## Create a new Changelog entry

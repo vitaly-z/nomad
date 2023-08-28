@@ -1,5 +1,5 @@
 // Copyright (c) HashiCorp, Inc.
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: BUSL-1.1
 
 package structs
 
@@ -17,17 +17,19 @@ import (
 	"fmt"
 	"hash"
 	"hash/crc32"
+	"maps"
 	"math"
 	"net"
 	"os"
 	"reflect"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
-	jwt "github.com/golang-jwt/jwt/v5"
+	jwt "github.com/go-jose/go-jose/v3/jwt"
 	"github.com/hashicorp/cronexpr"
 	"github.com/hashicorp/go-msgpack/codec"
 	"github.com/hashicorp/go-multierror"
@@ -49,8 +51,6 @@ import (
 	"github.com/mitchellh/copystructure"
 	"github.com/ryanuber/go-glob"
 	"golang.org/x/crypto/blake2b"
-	"golang.org/x/exp/maps"
-	"golang.org/x/exp/slices"
 )
 
 var (
@@ -1680,9 +1680,14 @@ type SingleAllocResponse struct {
 	QueryMeta
 }
 
-// AllocsGetResponse is used to return a set of allocations
+// AllocsGetResponse is used to return a set of allocations and their workload
+// identities.
 type AllocsGetResponse struct {
 	Allocs []*Allocation
+
+	// SignedIdentities are the alternate workload identities for the Allocs.
+	SignedIdentities []SignedWorkloadIdentity
+
 	QueryMeta
 }
 
@@ -4304,9 +4309,9 @@ const (
 	// for the system to remain healthy.
 	CoreJobPriority = math.MaxInt16
 
-	// JobTrackedVersions is the number of historic job versions that are
+	// JobDefaultTrackedVersions is the number of historic job versions that are
 	// kept.
-	JobTrackedVersions = 6
+	JobDefaultTrackedVersions = 6
 
 	// JobTrackedScalingEvents is the number of scaling events that are
 	// kept for a single task group.
@@ -4794,6 +4799,12 @@ func (j *Job) Warnings() error {
 	// Check AutoPromote, should be all or none
 	if hasAutoPromote && !allAutoPromote {
 		err := fmt.Errorf("auto_promote must be true for all groups to enable automatic promotion")
+		mErr.Errors = append(mErr.Errors, err)
+	}
+
+	// cron -> crons
+	if j.Periodic != nil && j.Periodic.Spec != "" {
+		err := fmt.Errorf("cron is deprecated and may be removed in a future release. Use crons instead")
 		mErr.Errors = append(mErr.Errors, err)
 	}
 
@@ -5578,6 +5589,10 @@ type PeriodicConfig struct {
 	// on the SpecType.
 	Spec string
 
+	// Specs specifies the intervals the job should be run as. It is parsed based
+	// on the SpecType.
+	Specs []string
+
 	// SpecType defines the format of the spec.
 	SpecType string
 
@@ -5610,7 +5625,10 @@ func (p *PeriodicConfig) Validate() error {
 	}
 
 	var mErr multierror.Error
-	if p.Spec == "" {
+	if p.Spec != "" && len(p.Specs) != 0 {
+		_ = multierror.Append(&mErr, fmt.Errorf("Only cron or crons may be used"))
+	}
+	if p.Spec == "" && len(p.Specs) == 0 {
 		_ = multierror.Append(&mErr, fmt.Errorf("Must specify a spec"))
 	}
 
@@ -5624,9 +5642,18 @@ func (p *PeriodicConfig) Validate() error {
 	switch p.SpecType {
 	case PeriodicSpecCron:
 		// Validate the cron spec
-		if _, err := cronexpr.Parse(p.Spec); err != nil {
-			_ = multierror.Append(&mErr, fmt.Errorf("Invalid cron spec %q: %v", p.Spec, err))
+		if p.Spec != "" {
+			if _, err := cronexpr.Parse(p.Spec); err != nil {
+				_ = multierror.Append(&mErr, fmt.Errorf("Invalid cron spec %q: %v", p.Spec, err))
+			}
 		}
+		// Validate the cron specs
+		for _, spec := range p.Specs {
+			if _, err := cronexpr.Parse(spec); err != nil {
+				_ = multierror.Append(&mErr, fmt.Errorf("Invalid cron spec %q: %v", spec, err))
+			}
+		}
+
 	case PeriodicSpecTest:
 		// No-op
 	default:
@@ -5648,15 +5675,18 @@ func (p *PeriodicConfig) Canonicalize() {
 
 // CronParseNext is a helper that parses the next time for the given expression
 // but captures any panic that may occur in the underlying library.
-func CronParseNext(e *cronexpr.Expression, fromTime time.Time, spec string) (t time.Time, err error) {
+func CronParseNext(fromTime time.Time, spec string) (t time.Time, err error) {
 	defer func() {
 		if recover() != nil {
 			t = time.Time{}
 			err = fmt.Errorf("failed parsing cron expression: %q", spec)
 		}
 	}()
-
-	return e.Next(fromTime), nil
+	exp, err := cronexpr.Parse(spec)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("failed parsing cron expression: %s: %v", spec, err)
+	}
+	return exp.Next(fromTime), nil
 }
 
 // Next returns the closest time instant matching the spec that is after the
@@ -5666,11 +5696,24 @@ func CronParseNext(e *cronexpr.Expression, fromTime time.Time, spec string) (t t
 func (p *PeriodicConfig) Next(fromTime time.Time) (time.Time, error) {
 	switch p.SpecType {
 	case PeriodicSpecCron:
-		e, err := cronexpr.Parse(p.Spec)
-		if err != nil {
-			return time.Time{}, fmt.Errorf("failed parsing cron expression: %q: %v", p.Spec, err)
+		// Single spec parsing
+		if p.Spec != "" {
+			return CronParseNext(fromTime, p.Spec)
 		}
-		return CronParseNext(e, fromTime, p.Spec)
+
+		// multiple specs parsing
+		var nextTime time.Time
+		for _, spec := range p.Specs {
+			t, err := CronParseNext(fromTime, spec)
+			if err != nil {
+				return time.Time{}, fmt.Errorf("failed parsing cron expression %s: %v", spec, err)
+			}
+			if nextTime.IsZero() || t.Before(nextTime) {
+				nextTime = t
+			}
+		}
+		return nextTime, nil
+
 	case PeriodicSpecTest:
 		split := strings.Split(p.Spec, ",")
 		if len(split) == 1 && split[0] == "" {
@@ -5865,16 +5908,18 @@ var (
 	// Canonicalize in api/tasks.go
 
 	DefaultServiceJobRestartPolicy = RestartPolicy{
-		Delay:    15 * time.Second,
-		Attempts: 2,
-		Interval: 30 * time.Minute,
-		Mode:     RestartPolicyModeFail,
+		Delay:           15 * time.Second,
+		Attempts:        2,
+		Interval:        30 * time.Minute,
+		Mode:            RestartPolicyModeFail,
+		RenderTemplates: false,
 	}
 	DefaultBatchJobRestartPolicy = RestartPolicy{
-		Delay:    15 * time.Second,
-		Attempts: 3,
-		Interval: 24 * time.Hour,
-		Mode:     RestartPolicyModeFail,
+		Delay:           15 * time.Second,
+		Attempts:        3,
+		Interval:        24 * time.Hour,
+		Mode:            RestartPolicyModeFail,
+		RenderTemplates: false,
 	}
 )
 
@@ -6207,6 +6252,9 @@ type RestartPolicy struct {
 	// Mode controls what happens when the task restarts more than attempt times
 	// in an interval.
 	Mode string
+
+	// RenderTemplates is flag to explicitly render all templates on task restart
+	RenderTemplates bool
 }
 
 func (r *RestartPolicy) Copy() *RestartPolicy {
@@ -7485,9 +7533,12 @@ type Task struct {
 	// CSIPluginConfig is used to configure the plugin supervisor for the task.
 	CSIPluginConfig *TaskCSIPluginConfig
 
-	// Identity controls if and how the workload identity is exposed to
-	// tasks similar to the Vault block.
+	// Identity is the default Nomad Workload Identity.
 	Identity *WorkloadIdentity
+
+	// Identities are the alternate workload identities for use with 3rd party
+	// endpoints.
+	Identities []*WorkloadIdentity
 }
 
 // UsesConnect is for conveniently detecting if the Task is able to make use
@@ -7549,6 +7600,7 @@ func (t *Task) Copy() *Task {
 	nt.DispatchPayload = nt.DispatchPayload.Copy()
 	nt.Lifecycle = nt.Lifecycle.Copy()
 	nt.Identity = nt.Identity.Copy()
+	nt.Identities = helper.CopySlice(nt.Identities)
 
 	if t.Artifacts != nil {
 		artifacts := make([]*TaskArtifact, 0, len(t.Artifacts))
@@ -7616,6 +7668,30 @@ func (t *Task) Canonicalize(job *Job, tg *TaskGroup) {
 	for _, template := range t.Templates {
 		template.Canonicalize()
 	}
+
+	// Initialize default Nomad workload identity
+	defaultIdx := -1
+	for i, wid := range t.Identities {
+		wid.Canonicalize()
+
+		// For backward compatibility put the default identity in Task.Identity.
+		if wid.Name == WorkloadIdentityDefaultName {
+			t.Identity = wid
+			defaultIdx = i
+		}
+	}
+
+	// If the default identity was found in Identities above, remove it from the
+	// slice.
+	if defaultIdx >= 0 {
+		t.Identities = slices.Delete(t.Identities, defaultIdx, defaultIdx+1)
+	}
+
+	// If there was no default identity, always create one.
+	if t.Identity == nil {
+		t.Identity = &WorkloadIdentity{}
+	}
+	t.Identity.Canonicalize()
 }
 
 func (t *Task) GoString() string {
@@ -7795,6 +7871,19 @@ func (t *Task) Validate(jobType string, tg *TaskGroup) error {
 		// TODO: Investigate validation of the PluginMountDir. Not much we can do apart from check IsAbs until after we understand its execution environment though :(
 	}
 
+	// Validate Identity/Identities
+	for _, wid := range t.Identities {
+		// Task.Canonicalize should move the default identity out of the Identities
+		// slice, so if one is found that means it is a duplicate.
+		if wid.Name == WorkloadIdentityDefaultName {
+			mErr.Errors = append(mErr.Errors, fmt.Errorf("Duplicate default identities found"))
+		}
+
+		if err := wid.Validate(); err != nil {
+			mErr.Errors = append(mErr.Errors, fmt.Errorf("Identity %q is invalid: %w", wid.Name, err))
+		}
+	}
+
 	return mErr.ErrorOrNil()
 }
 
@@ -7965,6 +8054,13 @@ func (t *Task) Warnings() error {
 	for idx, tmpl := range t.Templates {
 		if err := tmpl.Warnings(); err != nil {
 			err = multierror.Prefix(err, fmt.Sprintf("Template[%d]", idx))
+			mErr.Errors = append(mErr.Errors, err)
+		}
+	}
+
+	for _, wid := range t.Identities {
+		if err := wid.Warnings(); err != nil {
+			err = multierror.Prefix(err, fmt.Sprintf("Identity[%s]", wid.Name))
 			mErr.Errors = append(mErr.Errors, err)
 		}
 	}
@@ -9100,7 +9196,7 @@ func (e *TaskEvent) SetValidationError(err error) *TaskEvent {
 }
 
 func (e *TaskEvent) SetKillTimeout(timeout, maxTimeout time.Duration) *TaskEvent {
-	actual := helper.Min(timeout, maxTimeout)
+	actual := min(timeout, maxTimeout)
 	e.KillTimeout = actual
 	e.Details["kill_timeout"] = actual.String()
 	return e
@@ -9750,6 +9846,12 @@ const (
 
 // Vault stores the set of permissions a task needs access to from Vault.
 type Vault struct {
+	// Role is the Vault role used to login to Vault using a JWT.
+	//
+	// If empty, defaults to the server's create_from_role value or the Vault
+	// cluster default role.
+	Role string
+
 	// Policies is the set of policies that the task needs access to
 	Policies []string
 
@@ -9778,6 +9880,8 @@ func (v *Vault) Equal(o *Vault) bool {
 		return v == o
 	}
 	switch {
+	case v.Role != o.Role:
+		return false
 	case !slices.Equal(v.Policies, o.Policies):
 		return false
 	case v.Namespace != o.Namespace:
@@ -11095,35 +11199,6 @@ func (a *Allocation) NeedsToReconnect() bool {
 	return disconnected
 }
 
-func (a *Allocation) ToIdentityClaims(job *Job) *IdentityClaims {
-	now := jwt.NewNumericDate(time.Now().UTC())
-	claims := &IdentityClaims{
-		Namespace:    a.Namespace,
-		JobID:        a.JobID,
-		AllocationID: a.ID,
-		RegisteredClaims: jwt.RegisteredClaims{
-			// TODO: implement a refresh loop to prevent allocation identities from
-			// expiring before the allocation is terminal. Once that's implemented,
-			// add an ExpiresAt here ExpiresAt: &jwt.NumericDate{}
-			// https://github.com/hashicorp/nomad/issues/16258
-			NotBefore: now,
-			IssuedAt:  now,
-		},
-	}
-	if job != nil && job.ParentID != "" {
-		claims.JobID = job.ParentID
-	}
-	return claims
-}
-
-func (a *Allocation) ToTaskIdentityClaims(job *Job, taskName string) *IdentityClaims {
-	claims := a.ToIdentityClaims(job)
-	if claims != nil {
-		claims.TaskName = taskName
-	}
-	return claims
-}
-
 // IdentityClaims are the input to a JWT identifying a workload. It
 // should never be serialized to msgpack unsigned.
 type IdentityClaims struct {
@@ -11132,7 +11207,56 @@ type IdentityClaims struct {
 	AllocationID string `json:"nomad_allocation_id"`
 	TaskName     string `json:"nomad_task"`
 
-	jwt.RegisteredClaims
+	jwt.Claims
+}
+
+// NewIdentityClaims returns new workload identity claims. Since it may be
+// called with a denormalized Allocation, the Job must be passed in distinctly.
+//
+// ID claim is random (nondeterministic) so multiple calls with the same values
+// will not return equal claims by design. JWT IDs should never collide.
+func NewIdentityClaims(job *Job, alloc *Allocation, taskName string, wid *WorkloadIdentity, now time.Time) *IdentityClaims {
+
+	tg := job.LookupTaskGroup(alloc.TaskGroup)
+	if tg == nil {
+		return nil
+	}
+
+	jwtnow := jwt.NewNumericDate(now.UTC())
+	claims := &IdentityClaims{
+		Namespace:    alloc.Namespace,
+		JobID:        alloc.JobID,
+		AllocationID: alloc.ID,
+		Claims: jwt.Claims{
+			NotBefore: jwtnow,
+			IssuedAt:  jwtnow,
+		},
+	}
+
+	// If this is a child job, use the parent's ID
+	if job.ParentID != "" {
+		claims.JobID = job.ParentID
+	}
+
+	claims.TaskName = taskName
+	claims.Audience = wid.Audience
+	claims.SetSubject(job, alloc.TaskGroup, taskName, wid.Name)
+
+	claims.ID = uuid.Generate()
+
+	return claims
+}
+
+// SetSubject creates the standard subject claim for workload identities.
+func (claims *IdentityClaims) SetSubject(job *Job, group, task, id string) {
+	claims.Subject = strings.Join([]string{
+		job.Region,
+		job.Namespace,
+		job.ID,
+		group,
+		task,
+		id,
+	}, ":")
 }
 
 // AllocationDiff is another named type for Allocation (to use the same fields),

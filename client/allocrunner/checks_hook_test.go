@@ -1,5 +1,5 @@
 // Copyright (c) HashiCorp, Inc.
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: BUSL-1.1
 
 package allocrunner
 
@@ -130,13 +130,13 @@ func allocWithDifferentNomadChecks(id, addr, port string) *structs.Allocation {
 var checkHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case "/fail":
-		w.WriteHeader(500)
+		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = io.WriteString(w, "500 problem")
 	case "/hang":
 		time.Sleep(2 * time.Second)
 		_, _ = io.WriteString(w, "too slow")
 	default:
-		w.WriteHeader(200)
+		w.WriteHeader(http.StatusOK)
 		_, _ = io.WriteString(w, "200 ok")
 	}
 })

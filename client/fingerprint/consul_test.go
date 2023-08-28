@@ -1,5 +1,5 @@
 // Copyright (c) HashiCorp, Inc.
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: BUSL-1.1
 
 package fingerprint
 
@@ -449,7 +449,7 @@ func TestConsulFingerprint_Fingerprint_oss(t *testing.T) {
 
 	cf := newConsulFingerPrint(t)
 
-	ts, cfg := fakeConsul(fakeConsulPayload(t, "test_fixtures/consul/agent_self_oss.json"))
+	ts, cfg := fakeConsul(fakeConsulPayload(t, "test_fixtures/consul/agent_self_ce.json"))
 	defer ts.Close()
 
 	node := &structs.Node{Attributes: make(map[string]string)}

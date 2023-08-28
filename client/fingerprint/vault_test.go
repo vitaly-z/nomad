@@ -1,5 +1,5 @@
 // Copyright (c) HashiCorp, Inc.
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: BUSL-1.1
 
 package fingerprint
 
@@ -63,6 +63,11 @@ func TestVaultFingerprint(t *testing.T) {
 
 	// Stop Vault to simulate it being unavailable
 	tv.Stop()
+
+	// Reset the nextCheck time for testing purposes, or we won't pick up the
+	// change until the next period, up to 2min from now
+	vfp := fp.(*VaultFingerprint)
+	vfp.states["default"].nextCheck = time.Now()
 
 	err = fp.Fingerprint(request, &response)
 	if err != nil {

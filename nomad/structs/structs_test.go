@@ -1,5 +1,5 @@
 // Copyright (c) HashiCorp, Inc.
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: BUSL-1.1
 
 package structs
 
@@ -4307,9 +4307,10 @@ func TestRestartPolicy_Validate(t *testing.T) {
 
 	// Policy with acceptable restart options passes
 	p := &RestartPolicy{
-		Mode:     RestartPolicyModeFail,
-		Attempts: 0,
-		Interval: 5 * time.Second,
+		Mode:            RestartPolicyModeFail,
+		Attempts:        0,
+		Interval:        5 * time.Second,
+		RenderTemplates: true,
 	}
 	if err := p.Validate(); err != nil {
 		t.Fatalf("err: %v", err)
@@ -7667,12 +7668,16 @@ func TestVault_Equal(t *testing.T) {
 	must.NotEqual[*Vault](t, nil, new(Vault))
 
 	must.StructEqual(t, &Vault{
+		Role:         "nomad-task",
 		Policies:     []string{"one"},
 		Namespace:    "global",
 		Env:          true,
 		ChangeMode:   "signal",
 		ChangeSignal: "SIGILL",
 	}, []must.Tweak[*Vault]{{
+		Field: "Role",
+		Apply: func(v *Vault) { v.Role = "nomad-task-2" },
+	}, {
 		Field: "Policies",
 		Apply: func(v *Vault) { v.Policies = []string{"two"} },
 	}, {
@@ -7851,4 +7856,56 @@ func TestSpread_Equal(t *testing.T) {
 		Field: "SpreadTarget",
 		Apply: func(s *Spread) { s.SpreadTarget = nil },
 	}})
+}
+
+func TestTaskIdentity_Canonicalize(t *testing.T) {
+	ci.Parallel(t)
+
+	task := &Task{
+		Identities: []*WorkloadIdentity{
+			{
+				Name:     "consul",
+				Audience: []string{"a", "b"},
+				Env:      true,
+				File:     true,
+			},
+			{
+				Name: WorkloadIdentityDefaultName,
+			},
+			{
+				Name: "vault",
+				Env:  true,
+			},
+		},
+	}
+
+	tg := &TaskGroup{
+		Tasks: []*Task{task},
+	}
+	job := &Job{
+		TaskGroups: []*TaskGroup{tg},
+	}
+
+	task.Canonicalize(job, job.TaskGroups[0])
+
+	// For backward compatibility the default identity should have gotten moved
+	// to the original field.
+	must.NotNil(t, task.Identity)
+	must.Eq(t, WorkloadIdentityDefaultName, task.Identity.Name)
+	must.Eq(t, []string{WorkloadIdentityDefaultAud}, task.Identity.Audience)
+	must.False(t, task.Identity.Env)
+	must.False(t, task.Identity.File)
+
+	// Only alternate identities should remain
+	must.Len(t, 2, task.Identities)
+
+	must.Eq(t, "consul", task.Identities[0].Name)
+	must.Eq(t, []string{"a", "b"}, task.Identities[0].Audience)
+	must.True(t, task.Identities[0].Env)
+	must.True(t, task.Identities[0].File)
+
+	must.Eq(t, "vault", task.Identities[1].Name)
+	must.Len(t, 0, task.Identities[1].Audience)
+	must.True(t, task.Identities[1].Env)
+	must.False(t, task.Identities[1].File)
 }

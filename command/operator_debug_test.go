@@ -1,5 +1,5 @@
 // Copyright (c) HashiCorp, Inc.
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: BUSL-1.1
 
 package command
 
@@ -833,7 +833,7 @@ func TestDebug_RedirectError(t *testing.T) {
 		}
 
 		w.Header().Set("Location", "/ui/")
-		w.WriteHeader(307)
+		w.WriteHeader(http.StatusTemporaryRedirect)
 		fmt.Fprintln(w, `<a href="/ui/">Temporary Redirect</a>.`)
 	}))
 	defer ts.Close()

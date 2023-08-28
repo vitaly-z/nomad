@@ -1,11 +1,13 @@
 // Copyright (c) HashiCorp, Inc.
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: BUSL-1.1
 
 package agent
 
 import (
 	"fmt"
+	"maps"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -15,8 +17,6 @@ import (
 	"github.com/hashicorp/nomad/jobspec"
 	"github.com/hashicorp/nomad/jobspec2"
 	"github.com/hashicorp/nomad/nomad/structs"
-	"golang.org/x/exp/maps"
-	"golang.org/x/exp/slices"
 )
 
 // jobNotFoundErr is an error string which can be used as the return string
@@ -25,9 +25,9 @@ const jobNotFoundErr = "job not found"
 
 func (s *HTTPServer) JobsRequest(resp http.ResponseWriter, req *http.Request) (interface{}, error) {
 	switch req.Method {
-	case "GET":
+	case http.MethodGet:
 		return s.jobListRequest(resp, req)
-	case "PUT", "POST":
+	case http.MethodPut, http.MethodPost:
 		return s.jobUpdate(resp, req, "")
 	default:
 		return nil, CodedError(405, ErrInvalidMethod)
@@ -237,7 +237,7 @@ func (s *HTTPServer) periodicForceRequest(resp http.ResponseWriter, req *http.Re
 }
 
 func (s *HTTPServer) jobAllocations(resp http.ResponseWriter, req *http.Request, jobID string) (interface{}, error) {
-	if req.Method != "GET" {
+	if req.Method != http.MethodGet {
 		return nil, CodedError(405, ErrInvalidMethod)
 	}
 	allAllocs, _ := strconv.ParseBool(req.URL.Query().Get("all"))
@@ -266,7 +266,7 @@ func (s *HTTPServer) jobAllocations(resp http.ResponseWriter, req *http.Request,
 }
 
 func (s *HTTPServer) jobEvaluations(resp http.ResponseWriter, req *http.Request, jobID string) (interface{}, error) {
-	if req.Method != "GET" {
+	if req.Method != http.MethodGet {
 		return nil, CodedError(405, ErrInvalidMethod)
 	}
 	args := structs.JobSpecificRequest{
@@ -289,7 +289,7 @@ func (s *HTTPServer) jobEvaluations(resp http.ResponseWriter, req *http.Request,
 }
 
 func (s *HTTPServer) jobDeployments(resp http.ResponseWriter, req *http.Request, jobID string) (interface{}, error) {
-	if req.Method != "GET" {
+	if req.Method != http.MethodGet {
 		return nil, CodedError(405, ErrInvalidMethod)
 	}
 	all, _ := strconv.ParseBool(req.URL.Query().Get("all"))
@@ -314,7 +314,7 @@ func (s *HTTPServer) jobDeployments(resp http.ResponseWriter, req *http.Request,
 }
 
 func (s *HTTPServer) jobLatestDeployment(resp http.ResponseWriter, req *http.Request, jobID string) (interface{}, error) {
-	if req.Method != "GET" {
+	if req.Method != http.MethodGet {
 		return nil, CodedError(405, ErrInvalidMethod)
 	}
 	args := structs.JobSpecificRequest{
@@ -339,7 +339,7 @@ func (s *HTTPServer) jobSubmissionCRUD(resp http.ResponseWriter, req *http.Reque
 		return nil, CodedError(400, "Unable to parse job submission version parameter")
 	}
 	switch req.Method {
-	case "GET":
+	case http.MethodGet:
 		return s.jobSubmissionQuery(resp, req, jobID, version)
 	default:
 		return nil, CodedError(405, ErrInvalidMethod)
@@ -371,11 +371,11 @@ func (s *HTTPServer) jobSubmissionQuery(resp http.ResponseWriter, req *http.Requ
 
 func (s *HTTPServer) jobCRUD(resp http.ResponseWriter, req *http.Request, jobID string) (interface{}, error) {
 	switch req.Method {
-	case "GET":
+	case http.MethodGet:
 		return s.jobQuery(resp, req, jobID)
-	case "PUT", "POST":
+	case http.MethodPut, http.MethodPost:
 		return s.jobUpdate(resp, req, jobID)
-	case "DELETE":
+	case http.MethodDelete:
 		return s.jobDelete(resp, req, jobID)
 	default:
 		return nil, CodedError(405, ErrInvalidMethod)
@@ -545,9 +545,9 @@ func (s *HTTPServer) jobDelete(resp http.ResponseWriter, req *http.Request, jobI
 func (s *HTTPServer) jobScale(resp http.ResponseWriter, req *http.Request, jobID string) (interface{}, error) {
 
 	switch req.Method {
-	case "GET":
+	case http.MethodGet:
 		return s.jobScaleStatus(resp, req, jobID)
-	case "PUT", "POST":
+	case http.MethodPut, http.MethodPost:
 		return s.jobScaleAction(resp, req, jobID)
 	default:
 		return nil, CodedError(405, ErrInvalidMethod)
@@ -1007,6 +1007,10 @@ func ApiJobToStructJob(job *api.Job) *structs.Job {
 		if job.Periodic.Spec != nil {
 			j.Periodic.Spec = *job.Periodic.Spec
 		}
+
+		if job.Periodic.Specs != nil {
+			j.Periodic.Specs = job.Periodic.Specs
+		}
 	}
 
 	if job.ParameterizedJob != nil {
@@ -1058,10 +1062,11 @@ func ApiTgToStructsTG(job *structs.Job, taskGroup *api.TaskGroup, tg *structs.Ta
 	tg.Consul = apiConsulToStructs(taskGroup.Consul)
 
 	tg.RestartPolicy = &structs.RestartPolicy{
-		Attempts: *taskGroup.RestartPolicy.Attempts,
-		Interval: *taskGroup.RestartPolicy.Interval,
-		Delay:    *taskGroup.RestartPolicy.Delay,
-		Mode:     *taskGroup.RestartPolicy.Mode,
+		Attempts:        *taskGroup.RestartPolicy.Attempts,
+		Interval:        *taskGroup.RestartPolicy.Interval,
+		Delay:           *taskGroup.RestartPolicy.Delay,
+		Mode:            *taskGroup.RestartPolicy.Mode,
+		RenderTemplates: *taskGroup.RestartPolicy.RenderTemplates,
 	}
 
 	if taskGroup.ShutdownDelay != nil {
@@ -1200,19 +1205,41 @@ func ApiTaskToStructsTask(job *structs.Job, group *structs.TaskGroup,
 	structsTask.Affinities = ApiAffinitiesToStructs(apiTask.Affinities)
 	structsTask.CSIPluginConfig = ApiCSIPluginConfigToStructsCSIPluginConfig(apiTask.CSIPluginConfig)
 
-	if apiTask.Identity != nil {
+	// Nomad 1.5 CLIs and JSON jobs may set the default identity parameters in
+	// the Task.Identity field, so if it is non-nil use it.
+	if id := apiTask.Identity; id != nil {
 		structsTask.Identity = &structs.WorkloadIdentity{
-			Env:  apiTask.Identity.Env,
-			File: apiTask.Identity.File,
+			Name:     id.Name,
+			Audience: slices.Clone(id.Audience),
+			Env:      id.Env,
+			File:     id.File,
+		}
+	}
+
+	if ids := apiTask.Identities; len(ids) > 0 {
+		structsTask.Identities = make([]*structs.WorkloadIdentity, len(ids))
+		for i, id := range ids {
+			if id == nil {
+				continue
+			}
+
+			structsTask.Identities[i] = &structs.WorkloadIdentity{
+				Name:     id.Name,
+				Audience: slices.Clone(id.Audience),
+				Env:      id.Env,
+				File:     id.File,
+			}
+
 		}
 	}
 
 	if apiTask.RestartPolicy != nil {
 		structsTask.RestartPolicy = &structs.RestartPolicy{
-			Attempts: *apiTask.RestartPolicy.Attempts,
-			Interval: *apiTask.RestartPolicy.Interval,
-			Delay:    *apiTask.RestartPolicy.Delay,
-			Mode:     *apiTask.RestartPolicy.Mode,
+			Attempts:        *apiTask.RestartPolicy.Attempts,
+			Interval:        *apiTask.RestartPolicy.Interval,
+			Delay:           *apiTask.RestartPolicy.Delay,
+			Mode:            *apiTask.RestartPolicy.Mode,
+			RenderTemplates: *apiTask.RestartPolicy.RenderTemplates,
 		}
 	}
 
@@ -1262,6 +1289,7 @@ func ApiTaskToStructsTask(job *structs.Job, group *structs.TaskGroup,
 
 	if apiTask.Vault != nil {
 		structsTask.Vault = &structs.Vault{
+			Role:         apiTask.Vault.Role,
 			Policies:     apiTask.Vault.Policies,
 			Namespace:    *apiTask.Vault.Namespace,
 			Env:          *apiTask.Vault.Env,
@@ -1516,9 +1544,26 @@ func ApiServicesToStructs(in []*api.Service, group bool) []*structs.Service {
 			out[i].Connect = ApiConsulConnectToStructs(s.Connect)
 		}
 
+		if s.Identity != nil {
+			out[i].Identity = apiWorkloadIdentityToStructs(s.Identity)
+		}
+
 	}
 
 	return out
+}
+
+func apiWorkloadIdentityToStructs(in *api.WorkloadIdentity) *structs.WorkloadIdentity {
+	if in == nil {
+		return nil
+	}
+	return &structs.WorkloadIdentity{
+		Name:        in.Name,
+		Audience:    in.Audience,
+		Env:         in.Env,
+		File:        in.File,
+		ServiceName: in.ServiceName,
+	}
 }
 
 func ApiConsulConnectToStructs(in *api.ConsulConnect) *structs.ConsulConnect {

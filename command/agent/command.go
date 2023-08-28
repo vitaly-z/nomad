@@ -1,5 +1,5 @@
 // Copyright (c) HashiCorp, Inc.
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: BUSL-1.1
 
 package agent
 
@@ -77,6 +77,8 @@ func (c *Command) readConfig() *Config {
 		ACL:   &ACLConfig{},
 		Audit: &config.AuditConfig{},
 	}
+	cmdConfig.Vaults = map[string]*config.VaultConfig{"default": cmdConfig.Vault}
+	cmdConfig.Consuls = map[string]*config.ConsulConfig{"default": cmdConfig.Consul}
 
 	flags := flag.NewFlagSet("agent", flag.ContinueOnError)
 	flags.Usage = func() { c.Ui.Error(c.Help()) }

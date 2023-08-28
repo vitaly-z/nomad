@@ -1,5 +1,5 @@
 // Copyright (c) HashiCorp, Inc.
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: BUSL-1.1
 
 package agent
 
@@ -35,10 +35,11 @@ func MockJob() *api.Job {
 					SizeMB: pointer.Of(150),
 				},
 				RestartPolicy: &api.RestartPolicy{
-					Attempts: pointer.Of(3),
-					Interval: pointer.Of(10 * time.Minute),
-					Delay:    pointer.Of(1 * time.Minute),
-					Mode:     pointer.Of("delay"),
+					Attempts:        pointer.Of(3),
+					Interval:        pointer.Of(10 * time.Minute),
+					Delay:           pointer.Of(1 * time.Minute),
+					Mode:            pointer.Of("delay"),
+					RenderTemplates: pointer.Of(false),
 				},
 				Networks: []*api.NetworkResource{
 					{

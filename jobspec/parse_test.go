@@ -193,10 +193,11 @@ func TestParse(t *testing.T) {
 							"elb_checks":   "3",
 						},
 						RestartPolicy: &api.RestartPolicy{
-							Interval: timeToPtr(10 * time.Minute),
-							Attempts: intToPtr(5),
-							Delay:    timeToPtr(15 * time.Second),
-							Mode:     stringToPtr("delay"),
+							Interval:        timeToPtr(10 * time.Minute),
+							Attempts:        intToPtr(5),
+							Delay:           timeToPtr(15 * time.Second),
+							Mode:            stringToPtr("delay"),
+							RenderTemplates: boolToPtr(false),
 						},
 						Spreads: []*api.Spread{
 							{
@@ -560,6 +561,21 @@ func TestParse(t *testing.T) {
 				Periodic: &api.PeriodicConfig{
 					SpecType:        stringToPtr(api.PeriodicSpecCron),
 					Spec:            stringToPtr("*/5 * * *"),
+					ProhibitOverlap: boolToPtr(true),
+					TimeZone:        stringToPtr("Europe/Minsk"),
+				},
+			},
+			false,
+		},
+
+		{
+			"periodic-crons.hcl",
+			&api.Job{
+				ID:   stringToPtr("foo"),
+				Name: stringToPtr("foo"),
+				Periodic: &api.PeriodicConfig{
+					SpecType:        stringToPtr(api.PeriodicSpecCron),
+					Specs:           []string{"*/5 * * *", "*/7 * * *"},
 					ProhibitOverlap: boolToPtr(true),
 					TimeZone:        stringToPtr("Europe/Minsk"),
 				},

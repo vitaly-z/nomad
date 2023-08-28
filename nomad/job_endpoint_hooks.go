@@ -1,5 +1,5 @@
 // Copyright (c) HashiCorp, Inc.
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: BUSL-1.1
 
 package nomad
 
@@ -305,6 +305,14 @@ func (v *jobValidate) Validate(job *structs.Job) (warnings []error, err error) {
 		multierror.Append(validationErrors, fmt.Errorf("job priority must be between [%d, %d]", structs.JobMinPriority, v.srv.config.JobMaxPriority))
 	}
 
+	for _, tg := range job.TaskGroups {
+		for _, s := range tg.Services {
+			if s.Identity != nil && s.Identity.Name == "" {
+				multierror.Append(validationErrors, fmt.Errorf("service identity name cannot be empty"))
+			}
+		}
+	}
+
 	return warnings, validationErrors.ErrorOrNil()
 }
 
@@ -368,4 +376,43 @@ func (j *Job) submissionController(args *structs.JobRegisterRequest) error {
 		return fmt.Errorf("job source size of %s exceeds maximum of %s and will be discarded", totalSizeHuman, maxSizeHuman)
 	}
 	return nil
+}
+
+// jobIdentityCreator adds implicit `identity` blocks for external services,
+// like Consul and Vault.
+type jobIdentityCreator struct {
+	srv *Server
+}
+
+func (jobIdentityCreator) Name() string {
+	return "identityBlockCreator"
+}
+
+func (jobIdentityCreator) Mutate(job *structs.Job) (*structs.Job, []error, error) {
+	for _, tg := range job.TaskGroups {
+		for _, s := range tg.Services {
+			if s.Provider != "consul" {
+				continue
+			}
+
+			identityName := fmt.Sprintf("consul-service/%s", s.Name)
+
+			// if there's an identity block present, overwrite its name and ServiceName, but
+			// keep the rest. Users can set custom aud, file and env properties to account
+			// for the specifics of their environments, but Name and ServiceName must always
+			// conform to a convention.
+			if s.Identity != nil {
+				s.Identity.Name = identityName
+				s.Identity.ServiceName = s.Name
+			} else {
+				s.Identity = &structs.WorkloadIdentity{
+					Name:        identityName,
+					Audience:    []string{"consul.io"},
+					ServiceName: s.Name,
+				}
+			}
+		}
+	}
+
+	return job, nil, nil
 }

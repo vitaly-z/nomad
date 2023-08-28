@@ -1,5 +1,5 @@
 // Copyright (c) HashiCorp, Inc.
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: BUSL-1.1
 
 package allocrunner
 
@@ -11,8 +11,6 @@ import (
 
 	log "github.com/hashicorp/go-hclog"
 	multierror "github.com/hashicorp/go-multierror"
-	"golang.org/x/exp/maps"
-
 	"github.com/hashicorp/nomad/client/allocdir"
 	"github.com/hashicorp/nomad/client/allocrunner/interfaces"
 	"github.com/hashicorp/nomad/client/allocrunner/state"
@@ -23,7 +21,7 @@ import (
 	"github.com/hashicorp/nomad/client/devicemanager"
 	"github.com/hashicorp/nomad/client/dynamicplugins"
 	cinterfaces "github.com/hashicorp/nomad/client/interfaces"
-	"github.com/hashicorp/nomad/client/lib/cgutil"
+	"github.com/hashicorp/nomad/client/lib/proclib"
 	"github.com/hashicorp/nomad/client/pluginmanager/csimanager"
 	"github.com/hashicorp/nomad/client/pluginmanager/drivermanager"
 	"github.com/hashicorp/nomad/client/serviceregistration"
@@ -32,10 +30,12 @@ import (
 	cstate "github.com/hashicorp/nomad/client/state"
 	cstructs "github.com/hashicorp/nomad/client/structs"
 	"github.com/hashicorp/nomad/client/vaultclient"
+	"github.com/hashicorp/nomad/client/widmgr"
 	"github.com/hashicorp/nomad/helper/pointer"
 	"github.com/hashicorp/nomad/nomad/structs"
 	"github.com/hashicorp/nomad/plugins/device"
 	"github.com/hashicorp/nomad/plugins/drivers"
+	"golang.org/x/exp/maps"
 )
 
 // allocRunner is used to run all the tasks in a given allocation
@@ -164,9 +164,6 @@ type allocRunner struct {
 	// runner to manage their mounting
 	csiManager csimanager.Manager
 
-	// cpusetManager is responsible for configuring task cgroups if supported by the platform
-	cpusetManager cgutil.CpusetManager
-
 	// devicemanager is used to mount devices as well as lookup device
 	// statistics
 	devicemanager devicemanager.Manager
@@ -200,6 +197,12 @@ type allocRunner struct {
 
 	// getter is an interface for retrieving artifacts.
 	getter cinterfaces.ArtifactGetter
+
+	// wranglers is an interface for managing unix/windows processes.
+	wranglers cinterfaces.ProcessWranglers
+
+	// widmgr fetches workload identities
+	widmgr *widmgr.WIDMgr
 }
 
 // NewAllocRunner returns a new allocation runner.
@@ -233,7 +236,6 @@ func NewAllocRunner(config *config.AllocRunnerConfig) (interfaces.AllocRunner, e
 		prevAllocMigrator:        config.PrevAllocMigrator,
 		dynamicRegistry:          config.DynamicRegistry,
 		csiManager:               config.CSIManager,
-		cpusetManager:            config.CpusetManager,
 		devicemanager:            config.DeviceManager,
 		driverManager:            config.DriverManager,
 		serversContactedCh:       config.ServersContactedCh,
@@ -241,7 +243,9 @@ func NewAllocRunner(config *config.AllocRunnerConfig) (interfaces.AllocRunner, e
 		serviceRegWrapper:        config.ServiceRegWrapper,
 		checkStore:               config.CheckStore,
 		getter:                   config.Getter,
+		wranglers:                config.Wranglers,
 		hookResources:            cstructs.NewAllocHookResources(),
+		widmgr:                   config.WIDMgr,
 	}
 
 	// Create the logger based on the allocation ID
@@ -297,11 +301,9 @@ func (ar *allocRunner) initTaskRunners(tasks []*structs.Task) error {
 			ShutdownDelayCtx:    ar.shutdownDelayCtx,
 			ServiceRegWrapper:   ar.serviceRegWrapper,
 			Getter:              ar.getter,
+			Wranglers:           ar.wranglers,
 			AllocHookResources:  ar.hookResources,
-		}
-
-		if ar.cpusetManager != nil {
-			trConfig.CpusetCgroupPathGetter = ar.cpusetManager.CgroupPathFor(ar.id, task.Name)
+			WIDMgr:              ar.widmgr,
 		}
 
 		// Create, but do not Run, the task runner
@@ -450,6 +452,9 @@ func (ar *allocRunner) Restore() error {
 			return err
 		}
 		states[tr.Task().Name] = tr.TaskState()
+
+		// restore process wrangler for task
+		ar.wranglers.Setup(proclib.Task{AllocID: tr.Alloc().ID, Task: tr.Task().Name})
 	}
 
 	ar.taskCoordinator.Restore(states)
@@ -733,6 +738,19 @@ func (ar *allocRunner) killTasks() map[string]*structs.TaskState {
 		}(name, tr)
 	}
 	wg.Wait()
+
+	// Perform no action on post stop tasks, but retain their states if they exist. This
+	// commonly happens at the time of alloc GC from the client node.
+	for name, tr := range ar.tasks {
+		if !tr.IsPoststopTask() {
+			continue
+		}
+
+		state := tr.TaskState()
+		if state != nil {
+			states[name] = state
+		}
+	}
 
 	return states
 }

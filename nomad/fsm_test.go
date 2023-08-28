@@ -1,5 +1,5 @@
 // Copyright (c) HashiCorp, Inc.
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: BUSL-1.1
 
 package nomad
 
@@ -59,13 +59,14 @@ func testFSM(t *testing.T) *nomadFSM {
 	dispatcher, _ := testPeriodicDispatcher(t)
 	logger := testlog.HCLogger(t)
 	fsmConfig := &FSMConfig{
-		EvalBroker:        broker,
-		Periodic:          dispatcher,
-		Blocked:           NewBlockedEvals(broker, logger),
-		Logger:            logger,
-		Region:            "global",
-		EnableEventBroker: true,
-		EventBufferSize:   100,
+		EvalBroker:         broker,
+		Periodic:           dispatcher,
+		Blocked:            NewBlockedEvals(broker, logger),
+		Logger:             logger,
+		Region:             "global",
+		EnableEventBroker:  true,
+		EventBufferSize:    100,
+		JobTrackedVersions: structs.JobDefaultTrackedVersions,
 	}
 	fsm, err := NewFSM(fsmConfig)
 	if err != nil {

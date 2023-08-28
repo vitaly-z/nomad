@@ -1,5 +1,5 @@
 // Copyright (c) HashiCorp, Inc.
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: BUSL-1.1
 
 package nomad
 
@@ -35,8 +35,8 @@ import (
 	"github.com/hashicorp/nomad/command/agent/consul"
 	"github.com/hashicorp/nomad/helper"
 	"github.com/hashicorp/nomad/helper/codec"
+	"github.com/hashicorp/nomad/helper/goruntime"
 	"github.com/hashicorp/nomad/helper/pool"
-	"github.com/hashicorp/nomad/helper/stats"
 	"github.com/hashicorp/nomad/helper/tlsutil"
 	"github.com/hashicorp/nomad/lib/auth/oidc"
 	"github.com/hashicorp/nomad/nomad/deploymentwatcher"
@@ -217,6 +217,13 @@ type Server struct {
 
 	// volumeWatcher is used to release volume claims
 	volumeWatcher *volumewatcher.Watcher
+
+	// volumeControllerFutures is a map of plugin IDs to pending controller RPCs. If
+	// no RPC is pending for a given plugin, this may be nil.
+	volumeControllerFutures map[string]context.Context
+
+	// volumeControllerLock synchronizes access controllerFutures map
+	volumeControllerLock sync.Mutex
 
 	// keyringReplicator is used to replicate root encryption keys from the
 	// leader
@@ -445,6 +452,7 @@ func NewServer(config *Config, consulCatalog consul.CatalogAPI, consulConfigEntr
 		s.logger.Error("failed to create volume watcher", "error", err)
 		return nil, fmt.Errorf("failed to create volume watcher: %v", err)
 	}
+	s.volumeControllerFutures = map[string]context.Context{}
 
 	// Start the eval broker notification system so any subscribers can get
 	// updates when the processes SetEnabled is triggered.
@@ -969,7 +977,7 @@ func (s *Server) setupBootstrapHandler() error {
 			// walk all datacenter until it finds enough hosts to
 			// form a quorum.
 			shuffleStrings(dcs[1:])
-			dcs = dcs[0:helper.Min(len(dcs), datacenterQueryLimit)]
+			dcs = dcs[0:min(len(dcs), datacenterQueryLimit)]
 		}
 
 		nomadServerServiceName := s.config.ConsulConfig.ServerServiceName
@@ -1287,13 +1295,14 @@ func (s *Server) setupRaft() error {
 
 	// Create the FSM
 	fsmConfig := &FSMConfig{
-		EvalBroker:        s.evalBroker,
-		Periodic:          s.periodicDispatcher,
-		Blocked:           s.blockedEvals,
-		Logger:            s.logger,
-		Region:            s.Region(),
-		EnableEventBroker: s.config.EnableEventBroker,
-		EventBufferSize:   s.config.EventBufferSize,
+		EvalBroker:         s.evalBroker,
+		Periodic:           s.periodicDispatcher,
+		Blocked:            s.blockedEvals,
+		Logger:             s.logger,
+		Region:             s.Region(),
+		EnableEventBroker:  s.config.EnableEventBroker,
+		EventBufferSize:    s.config.EventBufferSize,
+		JobTrackedVersions: s.config.JobTrackedVersions,
 	}
 	var err error
 	s.fsm, err = NewFSM(fsmConfig)
@@ -1949,7 +1958,7 @@ func (s *Server) Stats() map[string]map[string]string {
 		},
 		"raft":    s.raft.Stats(),
 		"serf":    s.serf.Stats(),
-		"runtime": stats.RuntimeStats(),
+		"runtime": goruntime.RuntimeStats(),
 		"vault":   s.vault.Stats(),
 	}
 
@@ -2001,7 +2010,7 @@ func (s *Server) setReplyQueryMeta(stateStore *state.StateStore, table string, r
 	if err != nil {
 		return err
 	}
-	reply.Index = helper.Max(1, index)
+	reply.Index = max(1, index)
 
 	// Set the query response.
 	s.setQueryMeta(reply)

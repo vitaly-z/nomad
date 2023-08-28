@@ -1,5 +1,5 @@
 // Copyright (c) HashiCorp, Inc.
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: BUSL-1.1
 
 package nomad
 
@@ -73,6 +73,7 @@ func NewJobEndpoints(s *Server, ctx *RPCContext) *Job {
 			jobExposeCheckHook{},
 			jobImpliedConstraints{},
 			jobNodePoolMutatingHook{srv: s},
+			jobIdentityCreator{srv: s},
 		},
 		validators: []jobValidator{
 			jobConnectHook{},
@@ -1502,7 +1503,7 @@ func (j *Job) List(args *structs.JobListRequest, reply *structs.JobListResponse)
 			if err != nil {
 				return err
 			}
-			reply.Index = helper.Max(jindex, sindex)
+			reply.Index = max(jindex, sindex)
 
 			// Set the query response
 			j.srv.setQueryMeta(&reply.QueryMeta)

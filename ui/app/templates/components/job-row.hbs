@@ -1,6 +1,6 @@
 {{!
   Copyright (c) HashiCorp, Inc.
-  SPDX-License-Identifier: MPL-2.0
+  SPDX-License-Identifier: BUSL-1.1
 ~}}
 
 <td data-test-job-name
@@ -47,7 +47,7 @@
     {{this.job.displayType.type}}
   </td>
   <td data-test-job-node-pool>
-    {{this.job.nodePool}}
+    {{#if this.job.nodePool}}{{this.job.nodePool}}{{else}}-{{/if}}
   </td>
   <td data-test-job-priority>
     {{this.job.priority}}

@@ -1,5 +1,5 @@
 // Copyright (c) HashiCorp, Inc.
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: BUSL-1.1
 
 package agent
 
@@ -8,11 +8,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -30,8 +32,6 @@ import (
 	"github.com/hashicorp/nomad/nomad/structs"
 	"github.com/hashicorp/nomad/nomad/structs/config"
 	"github.com/hashicorp/nomad/version"
-	"golang.org/x/exp/maps"
-	"golang.org/x/exp/slices"
 )
 
 // Config is the configuration for the Nomad agent.
@@ -131,14 +131,30 @@ type Config struct {
 	// for security bulletins
 	DisableAnonymousSignature bool `hcl:"disable_anonymous_signature"`
 
-	// Consul contains the configuration for the Consul Agent and
+	// Consul contains the configuration for the default Consul Agent and
 	// parameters necessary to register services, their checks, and
 	// discover the current Nomad servers.
-	Consul *config.ConsulConfig `hcl:"consul"`
+	//
+	// TODO(tgross): we'll probably want to remove this field once we've added a
+	// selector so that we don't have to maintain it
+	Consul *config.ConsulConfig `hcl:"-"`
 
-	// Vault contains the configuration for the Vault Agent and
+	// Consuls is a map derived from multiple `consul` blocks, here to support
+	// features in Nomad Enterprise. The default Consul config pointer above will
+	// be found in this map under the name "default"
+	Consuls map[string]*config.ConsulConfig `hcl:"-"`
+
+	// Vault contains the configuration for the default Vault Agent and
 	// parameters necessary to derive tokens.
-	Vault *config.VaultConfig `hcl:"vault"`
+	//
+	// TODO(tgross): we'll probably want to remove this field once we've added a
+	// selector so that we don't have to maintain it
+	Vault *config.VaultConfig `hcl:"-"`
+
+	// Vaults is a map derived from multiple `vault` blocks, here to support
+	// features in Nomad Enterprise. The default Vault config pointer above will
+	// be found in this map under the name "default"
+	Vaults map[string]*config.VaultConfig `hcl:"-"`
 
 	// UI is used to configure the web UI
 	UI *config.UIConfig `hcl:"ui"`
@@ -674,6 +690,9 @@ type ServerConfig struct {
 	// before being discarded automatically. If unset, the maximum size defaults
 	// to 1 MB. If the value is zero, no job sources will be stored.
 	JobMaxSourceSize *string `hcl:"job_max_source_size"`
+
+	// JobTrackedVersions is the number of historic job versions that are kept.
+	JobTrackedVersions *int `hcl:"job_tracked_versions"`
 }
 
 func (s *ServerConfig) Copy() *ServerConfig {
@@ -702,6 +721,7 @@ func (s *ServerConfig) Copy() *ServerConfig {
 	ns.RaftTrailingLogs = pointer.Copy(s.RaftTrailingLogs)
 	ns.JobDefaultPriority = pointer.Copy(s.JobDefaultPriority)
 	ns.JobMaxPriority = pointer.Copy(s.JobMaxPriority)
+	ns.JobTrackedVersions = pointer.Copy(s.JobTrackedVersions)
 	return &ns
 }
 
@@ -1260,7 +1280,7 @@ func DevConfig(mode *devModeConfig) *Config {
 
 // DefaultConfig is the baseline configuration for Nomad.
 func DefaultConfig() *Config {
-	return &Config{
+	cfg := &Config{
 		LogLevel:   "INFO",
 		Region:     "global",
 		Datacenter: "dc1",
@@ -1329,7 +1349,8 @@ func DefaultConfig() *Config {
 				LimitResults:  100,
 				MinTermLength: 2,
 			},
-			JobMaxSourceSize: pointer.Of("1M"),
+			JobMaxSourceSize:   pointer.Of("1M"),
+			JobTrackedVersions: pointer.Of(structs.JobDefaultTrackedVersions),
 		},
 		ACL: &ACLConfig{
 			Enabled:   false,
@@ -1350,6 +1371,10 @@ func DefaultConfig() *Config {
 		DisableUpdateCheck: pointer.Of(false),
 		Limits:             config.DefaultLimits(),
 	}
+
+	cfg.Consuls = map[string]*config.ConsulConfig{"default": cfg.Consul}
+	cfg.Vaults = map[string]*config.VaultConfig{"default": cfg.Vault}
+	return cfg
 }
 
 // Listener can be used to get a new listener using a custom bind address.
@@ -1510,20 +1535,13 @@ func (c *Config) Merge(b *Config) *Config {
 		result.AdvertiseAddrs = result.AdvertiseAddrs.Merge(b.AdvertiseAddrs)
 	}
 
-	// Apply the Consul Configuration
-	if result.Consul == nil && b.Consul != nil {
-		result.Consul = b.Consul.Copy()
-	} else if b.Consul != nil {
-		result.Consul = result.Consul.Merge(b.Consul)
-	}
+	// Apply the Consul Configurations and overwrite the default Consul config
+	result.Consuls = mergeConsulConfigs(result.Consuls, b.Consuls)
+	result.Consul = result.Consuls["default"]
 
-	// Apply the Vault Configuration
-	if result.Vault == nil && b.Vault != nil {
-		vaultConfig := *b.Vault
-		result.Vault = &vaultConfig
-	} else if b.Vault != nil {
-		result.Vault = result.Vault.Merge(b.Vault)
-	}
+	// Apply the Vault Configurations and overwrite the default Vault config
+	result.Vaults = mergeVaultConfigs(result.Vaults, b.Vaults)
+	result.Vault = result.Vaults["default"]
 
 	// Apply the UI Configuration
 	if result.UI == nil && b.UI != nil {
@@ -1574,6 +1592,36 @@ func (c *Config) Merge(b *Config) *Config {
 	return &result
 }
 
+func mergeVaultConfigs(left, right map[string]*config.VaultConfig) map[string]*config.VaultConfig {
+	merged := helper.DeepCopyMap(left)
+	if left == nil {
+		merged = map[string]*config.VaultConfig{}
+	}
+	for name, rConfig := range right {
+		if lConfig, ok := left[name]; ok {
+			merged[name] = lConfig.Merge(rConfig)
+		} else {
+			merged[name] = rConfig.Copy()
+		}
+	}
+	return merged
+}
+
+func mergeConsulConfigs(left, right map[string]*config.ConsulConfig) map[string]*config.ConsulConfig {
+	merged := helper.DeepCopyMap(left)
+	if left == nil {
+		merged = map[string]*config.ConsulConfig{}
+	}
+	for name, rConfig := range right {
+		if lConfig, ok := left[name]; ok {
+			merged[name] = lConfig.Merge(rConfig)
+		} else {
+			merged[name] = rConfig.Copy()
+		}
+	}
+	return merged
+}
+
 // Copy returns a deep copy safe for mutation.
 func (c *Config) Copy() *Config {
 	if c == nil {
@@ -1591,7 +1639,9 @@ func (c *Config) Copy() *Config {
 	nc.Telemetry = c.Telemetry.Copy()
 	nc.DisableUpdateCheck = pointer.Copy(c.DisableUpdateCheck)
 	nc.Consul = c.Consul.Copy()
+	nc.Consuls = helper.DeepCopyMap(c.Consuls)
 	nc.Vault = c.Vault.Copy()
+	nc.Vaults = helper.DeepCopyMap(c.Vaults)
 	nc.UI = c.UI.Copy()
 
 	nc.NomadConfig = c.NomadConfig.Copy()
@@ -2031,6 +2081,10 @@ func (s *ServerConfig) Merge(b *ServerConfig) *ServerConfig {
 		result.RaftBoltConfig = &RaftBoltConfig{
 			NoFreelistSync: b.RaftBoltConfig.NoFreelistSync,
 		}
+	}
+
+	if b.JobTrackedVersions != nil {
+		result.JobTrackedVersions = b.JobTrackedVersions
 	}
 
 	// Add the schedulers

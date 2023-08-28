@@ -1,5 +1,5 @@
 // Copyright (c) HashiCorp, Inc.
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: BUSL-1.1
 
 package fingerprint
 
@@ -247,18 +247,14 @@ func deriveAddressAliases(iface net.Interface, addr net.IP, config *config.Confi
 		}
 	}
 
-	if len(aliases) > 0 {
-		return
-	}
-
 	if config.NetworkInterface != "" {
 		if config.NetworkInterface == iface.Name {
-			return []string{"default"}
+			aliases = append(aliases, "default")
 		}
 	} else if ri, err := sockaddr.NewRouteInfo(); err == nil {
 		defaultIface, err := ri.GetDefaultInterfaceName()
 		if err == nil && iface.Name == defaultIface {
-			return []string{"default"}
+			aliases = append(aliases, "default")
 		}
 	}
 

@@ -1,19 +1,19 @@
 // Copyright (c) HashiCorp, Inc.
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: BUSL-1.1
 
 package scheduler
 
 import (
 	"encoding/binary"
 	"fmt"
+	"maps"
 	"math/rand"
+	"slices"
 
 	log "github.com/hashicorp/go-hclog"
 	memdb "github.com/hashicorp/go-memdb"
 	"github.com/hashicorp/nomad/helper"
 	"github.com/hashicorp/nomad/nomad/structs"
-	"golang.org/x/exp/maps"
-	"golang.org/x/exp/slices"
 )
 
 // allocTuple is a tuple of the allocation name and potential alloc ID
@@ -258,6 +258,13 @@ func tasksUpdated(jobA, jobB *structs.Job, taskGroup string) comparison {
 		return difference("volume request", a.Volumes, b.Volumes)
 	}
 
+	// Check if restart.render_templates is updated
+	// this requires a destructive update for template hook to receive the new config
+	if c := renderTemplatesUpdated(a.RestartPolicy, b.RestartPolicy,
+		"group restart render_templates"); c.modified {
+		return c
+	}
+
 	// Check each task
 	for _, at := range a.Tasks {
 		bt := b.LookupTask(at.Name)
@@ -308,9 +315,13 @@ func tasksUpdated(jobA, jobB *structs.Job, taskGroup string) comparison {
 			return c
 		}
 
-		// Inspect Identity being exposed
+		// Inspect Identities being exposed
 		if !at.Identity.Equal(bt.Identity) {
 			return difference("task identity", at.Identity, bt.Identity)
+		}
+
+		if !slices.EqualFunc(at.Identities, bt.Identities, func(a, b *structs.WorkloadIdentity) bool { return a.Equal(b) }) {
+			return difference("task identity", at.Identities, bt.Identities)
 		}
 
 		// Most LogConfig updates are in-place but if we change Disabled we need
@@ -319,6 +330,13 @@ func tasksUpdated(jobA, jobB *structs.Job, taskGroup string) comparison {
 		if at.LogConfig.Disabled != bt.LogConfig.Disabled {
 			return difference("task log disabled", at.LogConfig.Disabled, bt.LogConfig.Disabled)
 		}
+
+		// Check if restart.render_templates is updated
+		if c := renderTemplatesUpdated(at.RestartPolicy, bt.RestartPolicy,
+			"task restart render_templates"); c.modified {
+			return c
+		}
+
 	}
 
 	// none of the fields that trigger a destructive update were modified,
@@ -561,6 +579,23 @@ func spreadsUpdated(jobA, jobB *structs.Job, taskGroup string) comparison {
 	}
 
 	return same
+}
+
+// renderTemplatesUpdated returns the difference in the RestartPolicy's
+// render_templates field, if set
+func renderTemplatesUpdated(a, b *structs.RestartPolicy, msg string) comparison {
+
+	noRenderA := a == nil || !a.RenderTemplates
+	noRenderB := b == nil || !b.RenderTemplates
+
+	if noRenderA && !noRenderB {
+		return difference(msg, false, true)
+	}
+	if !noRenderA && noRenderB {
+		return difference(msg, true, false)
+	}
+
+	return same // both nil, or one nil and the other false
 }
 
 // setStatus is used to update the status of the evaluation

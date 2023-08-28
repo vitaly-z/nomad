@@ -1,5 +1,5 @@
 // Copyright (c) HashiCorp, Inc.
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: BUSL-1.1
 
 package nomad
 
@@ -8,12 +8,12 @@ import (
 	"net"
 	"os"
 	"runtime"
+	"slices"
 	"time"
 
 	log "github.com/hashicorp/go-hclog"
-	"golang.org/x/exp/slices"
-
 	"github.com/hashicorp/memberlist"
+	"github.com/hashicorp/nomad/helper"
 	"github.com/hashicorp/nomad/helper/pointer"
 	"github.com/hashicorp/nomad/helper/uuid"
 	"github.com/hashicorp/nomad/nomad/deploymentwatcher"
@@ -310,8 +310,18 @@ type Config struct {
 	// ConsulConfig is this Agent's Consul configuration
 	ConsulConfig *config.ConsulConfig
 
-	// VaultConfig is this Agent's Vault configuration
+	// ConsulConfigs is a map of Consul configurations, here to support features
+	// in Nomad Enterprise. The default Consul config pointer above will be
+	// found in this map under the name "default"
+	ConsulConfigs map[string]*config.ConsulConfig
+
+	// VaultConfig is this Agent's default Vault configuration
 	VaultConfig *config.VaultConfig
+
+	// VaultConfigs is a map of Vault configurations, here to support features
+	// in Nomad Enterprise. The default Vault config pointer above will be found
+	// in this map under the name "default"
+	VaultConfigs map[string]*config.VaultConfig
 
 	// RPCHoldTimeout is how long an RPC can be "held" before it is errored.
 	// This is used to paper over a loss of leadership by instead holding RPCs,
@@ -416,6 +426,9 @@ type Config struct {
 
 	// JobMaxPriority is an upper bound on the Job priority.
 	JobMaxPriority int
+
+	// JobTrackedVersions is the number of historic Job versions that are kept.
+	JobTrackedVersions int
 }
 
 func (c *Config) Copy() *Config {
@@ -438,7 +451,9 @@ func (c *Config) Copy() *Config {
 	nc.SerfConfig = pointer.Copy(c.SerfConfig)
 	nc.EnabledSchedulers = slices.Clone(c.EnabledSchedulers)
 	nc.ConsulConfig = c.ConsulConfig.Copy()
+	nc.ConsulConfigs = helper.DeepCopyMap(c.ConsulConfigs)
 	nc.VaultConfig = c.VaultConfig.Copy()
+	nc.VaultConfigs = helper.DeepCopyMap(c.VaultConfigs)
 	nc.TLSConfig = c.TLSConfig.Copy()
 	nc.SentinelConfig = c.SentinelConfig.Copy()
 	nc.AutopilotConfig = c.AutopilotConfig.Copy()
@@ -535,7 +550,11 @@ func DefaultConfig() *Config {
 		DeploymentQueryRateLimit: deploymentwatcher.LimitStateQueriesPerSecond,
 		JobDefaultPriority:       structs.JobDefaultPriority,
 		JobMaxPriority:           structs.JobDefaultMaxPriority,
+		JobTrackedVersions:       structs.JobDefaultTrackedVersions,
 	}
+
+	c.ConsulConfigs = map[string]*config.ConsulConfig{"default": c.ConsulConfig}
+	c.VaultConfigs = map[string]*config.VaultConfig{"default": c.VaultConfig}
 
 	// Enable all known schedulers by default
 	c.EnabledSchedulers = make([]string, 0, len(scheduler.BuiltinSchedulers))

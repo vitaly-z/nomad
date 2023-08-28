@@ -1,5 +1,5 @@
 // Copyright (c) HashiCorp, Inc.
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: BUSL-1.1
 
 package allocwatcher
 
@@ -279,15 +279,7 @@ func (p *localPrevAlloc) Migrate(ctx context.Context, dest *allocdir.AllocDir) e
 
 	p.logger.Debug("copying previous alloc")
 
-	moveErr := dest.Move(p.prevAllocDir, p.tasks)
-
-	// Always cleanup previous alloc
-	if err := p.prevAllocDir.Destroy(); err != nil {
-		p.logger.Error("error destroying alloc dir",
-			"error", err, "previous_alloc_dir", p.prevAllocDir.AllocDir)
-	}
-
-	return moveErr
+	return dest.Move(p.prevAllocDir, p.tasks)
 }
 
 // remotePrevAlloc is a prevAllocWatcher for previous allocations on remote

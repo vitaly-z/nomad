@@ -1,5 +1,5 @@
 // Copyright (c) HashiCorp, Inc.
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: BUSL-1.1
 
 package docker
 
@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,7 +24,9 @@ import (
 	multierror "github.com/hashicorp/go-multierror"
 	plugin "github.com/hashicorp/go-plugin"
 	"github.com/hashicorp/go-set"
-	"github.com/hashicorp/nomad/client/lib/cgutil"
+	"github.com/hashicorp/nomad/client/lib/cgroupslib"
+	"github.com/hashicorp/nomad/client/lib/cpustats"
+	"github.com/hashicorp/nomad/client/lib/numalib"
 	"github.com/hashicorp/nomad/client/taskenv"
 	"github.com/hashicorp/nomad/drivers/docker/docklog"
 	"github.com/hashicorp/nomad/drivers/shared/capabilities"
@@ -31,12 +34,12 @@ import (
 	"github.com/hashicorp/nomad/drivers/shared/hostnames"
 	"github.com/hashicorp/nomad/drivers/shared/resolvconf"
 	"github.com/hashicorp/nomad/helper"
+	"github.com/hashicorp/nomad/helper/pointer"
 	nstructs "github.com/hashicorp/nomad/nomad/structs"
 	"github.com/hashicorp/nomad/plugins/base"
 	"github.com/hashicorp/nomad/plugins/drivers"
 	pstructs "github.com/hashicorp/nomad/plugins/shared/structs"
 	"github.com/ryanuber/go-glob"
-	"golang.org/x/exp/slices"
 )
 
 var (
@@ -138,6 +141,9 @@ type Driver struct {
 	// gpuRuntime indicates nvidia-docker runtime availability
 	gpuRuntime bool
 
+	// top contains information about the system topology
+	top cpustats.Topology
+
 	// A tri-state boolean to know if the fingerprinting has happened and
 	// whether it has been successful
 	fingerprintSuccess *bool
@@ -153,11 +159,10 @@ type Driver struct {
 	infinityClient   *docker.Client // for wait and stop calls (use getInfinityClient())
 
 	danglingReconciler *containerReconciler
-	cpusetFixer        CpusetFixer
 }
 
 // NewDockerDriver returns a docker implementation of a driver plugin
-func NewDockerDriver(ctx context.Context, logger hclog.Logger) drivers.DriverPlugin {
+func NewDockerDriver(ctx context.Context, top cpustats.Topology, logger hclog.Logger) drivers.DriverPlugin {
 	logger = logger.Named(pluginName)
 	driver := &Driver{
 		eventer:         eventer.NewEventer(ctx, logger),
@@ -166,8 +171,8 @@ func NewDockerDriver(ctx context.Context, logger hclog.Logger) drivers.DriverPlu
 		pauseContainers: newPauseContainerStore(),
 		ctx:             ctx,
 		logger:          logger,
+		top:             numalib.Scan(numalib.PlatformScanners()), // TODO(shoenig) grpc plumbing
 	}
-
 	return driver
 }
 
@@ -403,17 +408,6 @@ CREATE:
 			container.ID, "container_state", container.State.String())
 	}
 
-	if !cgutil.UseV2 {
-		// This does not apply to cgroups.v2, which only allows setting the PID
-		// into exactly 1 group. For cgroups.v2, we use the cpuset fixer to reconcile
-		// the cpuset value into the cgroups created by docker in the background.
-		if containerCfg.HostConfig.CPUSet == "" && cfg.Resources.LinuxResources.CpusetCgroupPath != "" {
-			if err := setCPUSetCgroup(cfg.Resources.LinuxResources.CpusetCgroupPath, container.State.Pid); err != nil {
-				return nil, nil, fmt.Errorf("failed to set the cpuset cgroup for container: %v", err)
-			}
-		}
-	}
-
 	collectingLogs := loggingIsEnabled(d.config, cfg)
 
 	var dlogger docklog.DockerLogger
@@ -483,7 +477,9 @@ type createContainerClient interface {
 func (d *Driver) createContainer(client createContainerClient, config docker.CreateContainerOptions,
 	image string) (*docker.Container, error) {
 	// Create a container
-	attempted := 0
+	var attempted uint64
+	var backoff time.Duration
+
 CREATE:
 	container, createErr := client.CreateContainer(config)
 	if createErr == nil {
@@ -533,16 +529,19 @@ CREATE:
 
 		if attempted < 5 {
 			attempted++
-			time.Sleep(nextBackoff(attempted))
+			backoff = helper.Backoff(50*time.Millisecond, time.Minute, attempted)
+			time.Sleep(backoff)
 			goto CREATE
 		}
+
 	} else if strings.Contains(strings.ToLower(createErr.Error()), "no such image") {
 		// There is still a very small chance this is possible even with the
 		// coordinator so retry.
 		return nil, nstructs.NewRecoverableError(createErr, true)
 	} else if isDockerTransientError(createErr) && attempted < 5 {
 		attempted++
-		time.Sleep(nextBackoff(attempted))
+		backoff = helper.Backoff(50*time.Millisecond, time.Minute, attempted)
+		time.Sleep(backoff)
 		goto CREATE
 	}
 
@@ -557,8 +556,9 @@ func (d *Driver) startContainer(c *docker.Container) error {
 		return err
 	}
 
-	// Start a container
-	attempted := 0
+	var attempted uint64
+	var backoff time.Duration
+
 START:
 	startErr := dockerClient.StartContainer(c.ID, c.HostConfig)
 	if startErr == nil || strings.Contains(startErr.Error(), "Container already running") {
@@ -570,20 +570,14 @@ START:
 	if isDockerTransientError(startErr) {
 		if attempted < 5 {
 			attempted++
-			time.Sleep(nextBackoff(attempted))
+			backoff = helper.Backoff(50*time.Millisecond, time.Minute, attempted)
+			time.Sleep(backoff)
 			goto START
 		}
 		return nstructs.NewRecoverableError(startErr, true)
 	}
 
 	return recoverableErrTimeouts(startErr)
-}
-
-// nextBackoff returns appropriate docker backoff durations after attempted attempts.
-func nextBackoff(attempted int) time.Duration {
-	// attempts in 200ms, 800ms, 3.2s, 12.8s, 51.2s
-	// TODO: add randomization factor and extract to a helper
-	return 1 << (2 * uint64(attempted)) * 50 * time.Millisecond
 }
 
 // createImage creates a docker image either by pulling it from a registry or by
@@ -911,15 +905,6 @@ func memoryLimits(driverHardLimitMB int64, taskMemory drivers.MemoryResources) (
 	return hard * 1024 * 1024, softBytes
 }
 
-// Extract the cgroup parent from the nomad cgroup (only for linux/v2)
-func cgroupParent(resources *drivers.Resources) string {
-	var parent string
-	if cgutil.UseV2 && resources != nil && resources.LinuxResources != nil {
-		parent, _ = cgutil.SplitPath(resources.LinuxResources.CpusetCgroupPath)
-	}
-	return parent
-}
-
 func (d *Driver) createContainerConfig(task *drivers.TaskConfig, driverConfig *TaskConfig,
 	imageID string) (docker.CreateContainerOptions, error) {
 
@@ -992,7 +977,7 @@ func (d *Driver) createContainerConfig(task *drivers.TaskConfig, driverConfig *T
 	}
 
 	hostConfig := &docker.HostConfig{
-		CgroupParent: cgroupParent(task.Resources), // if applicable
+		// TODO(shoenig) set cgroup parent when we do partitioning
 
 		Memory:            memory,            // hard limit
 		MemoryReservation: memoryReservation, // soft limit
@@ -1051,9 +1036,11 @@ func (d *Driver) createContainerConfig(task *drivers.TaskConfig, driverConfig *T
 		hostConfig.MemorySwap = memory
 
 		// disable swap explicitly in non-Windows environments
-		var swapiness int64 = 0
-		hostConfig.MemorySwappiness = &swapiness
-
+		if cgroupslib.MaybeDisableMemorySwappiness() != nil {
+			hostConfig.MemorySwappiness = pointer.Of(int64(*(cgroupslib.MaybeDisableMemorySwappiness())))
+		} else {
+			hostConfig.MemorySwappiness = nil
+		}
 	}
 
 	loggingDriver := driverConfig.Logging.Type
@@ -1683,7 +1670,7 @@ func (d *Driver) TaskStats(ctx context.Context, taskID string, interval time.Dur
 		return nil, drivers.ErrTaskNotFound
 	}
 
-	return h.Stats(ctx, interval)
+	return h.Stats(ctx, interval, d.top)
 }
 
 func (d *Driver) TaskEvents(ctx context.Context) (<-chan *drivers.TaskEvent, error) {

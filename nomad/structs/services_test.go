@@ -1,5 +1,5 @@
 // Copyright (c) HashiCorp, Inc.
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: BUSL-1.1
 
 package structs
 
@@ -1806,6 +1806,21 @@ func TestService_Validate(t *testing.T) {
 					{
 						Name: "servicecheck",
 						Type: "script",
+					},
+				},
+			},
+			expErr: true,
+		},
+		{
+			name: "provider nomad with tls skip verify",
+			input: &Service{
+				Name:     "testservice",
+				Provider: "nomad",
+				Checks: []*ServiceCheck{
+					{
+						Name:          "servicecheck",
+						Type:          "http",
+						TLSSkipVerify: true,
 					},
 				},
 			},
