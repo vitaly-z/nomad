@@ -1790,9 +1790,7 @@ func TestCSIVolume_expandVolume(t *testing.T) {
 				NodeExpansionRequired: true,
 			}
 
-			cp := vol.Copy()
-
-			err = endpoint.expandVolume(cp, plug, &csi.CapacityRange{
+			err = endpoint.expandVolume(vol, plug, &csi.CapacityRange{
 				RequiredBytes: tc.NewMin,
 				LimitBytes:    tc.NewMax,
 			})
@@ -1804,15 +1802,12 @@ func TestCSIVolume_expandVolume(t *testing.T) {
 
 			must.NoError(t, err)
 
-			test.Eq(t, tc.ExpectCapacity, cp.Capacity,
+			test.Eq(t, tc.ExpectCapacity, vol.Capacity,
 				test.Sprint("unexpected capacity"))
-			test.Eq(t, tc.ExpectMin, cp.RequestedCapacityMin,
+			test.Eq(t, tc.ExpectMin, vol.RequestedCapacityMin,
 				test.Sprint("unexpected min"))
-			test.Eq(t, tc.ExpectMax, cp.RequestedCapacityMax,
+			test.Eq(t, tc.ExpectMax, vol.RequestedCapacityMax,
 				test.Sprint("unexpected max"))
-
-			// save for the next test to build upon
-			*vol = *cp
 		})
 	}
 

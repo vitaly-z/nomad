@@ -535,7 +535,6 @@ func TestCSIController_ExpandVolume(t *testing.T) {
 					RequiredBytes: 99,
 				},
 				Secrets: map[string]string{"super": "secret"},
-				// TODO: VolumeCapability
 			}
 			if tc.ModRequest != nil {
 				tc.ModRequest(req)

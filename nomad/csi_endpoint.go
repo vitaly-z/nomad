@@ -380,10 +380,13 @@ func (v *CSIVolume) Register(args *structs.CSIVolumeRegisterRequest, reply *stru
 	return nil
 }
 
+// reconcileVolume updates the "old" volume with many of the contents of "new"
+// It may or may not do extra work to actually expand a volume outside of Nomad,
+// depending on whether requested capacity values have changed.
 func (v *CSIVolume) reconcileVolume(plugin *structs.CSIPlugin, old *structs.CSIVolume, new *structs.CSIVolume) error {
 	// Merge does some validation, before we attempt any potential CSI RPCs,
 	// and mutates `old` with (most of) the values of `new`
-	err := old.Merge(new)
+	err := old.Merge(new) // this skips capacity values
 	if err != nil {
 		return err
 	}
@@ -1026,7 +1029,11 @@ func (v *CSIVolume) Create(args *structs.CSIVolumeCreateRequest, reply *structs.
 		if err != nil {
 			return err
 		}
+		// current will be nil if it does not exist.
 		current, err := snap.CSIVolumeByID(ws, vol.Namespace, vol.ID)
+		if err != nil {
+			return err
+		}
 
 		validatedVols = append(validatedVols,
 			validated{vol, plugin, current})
@@ -1049,12 +1056,13 @@ func (v *CSIVolume) Create(args *structs.CSIVolumeCreateRequest, reply *structs.
 	for _, valid := range validatedVols {
 		if valid.current != nil {
 			// reconcile mutable fields
-			err = v.reconcileVolume(valid.plugin, valid.current, valid.vol)
+			cp := valid.current.Copy()
+			err = v.reconcileVolume(valid.plugin, cp, valid.vol)
 			if err != nil {
 				multierror.Append(&mErr, err)
 			} else {
-				// we merged valid.vol into valid.current, so update state with valid.current
-				regArgs.Volumes = append(regArgs.Volumes, valid.current)
+				// we merged valid.vol into cp, so update state with the copy
+				regArgs.Volumes = append(regArgs.Volumes, cp)
 			}
 
 		} else {
@@ -1067,7 +1075,7 @@ func (v *CSIVolume) Create(args *structs.CSIVolumeCreateRequest, reply *structs.
 		}
 	}
 
-	// If we created volumes here, apply them to raft.
+	// If we created or updated volumes, apply them to raft.
 	if len(regArgs.Volumes) > 0 {
 		_, index, err = v.srv.raftApply(structs.CSIVolumeRegisterRequestType, regArgs)
 		if err != nil {
@@ -1144,8 +1152,7 @@ func (v *CSIVolume) expandVolume(vol *structs.CSIVolume, plugin *structs.CSIPlug
 		)
 	}
 
-	// If capacity unset, skip everything. CSI spec considers this an error,
-	// but in our volume spec, both are optional, so here we just do nothing.
+	// If requested capacity values are unset, skip everything.
 	if newMax == 0 && newMin == 0 {
 		logger().Debug("min and max values are zero")
 		return nil
@@ -1206,6 +1213,8 @@ func (v *CSIVolume) expandVolume(vol *structs.CSIVolume, plugin *structs.CSIPlug
 	cResp := &cstructs.ClientCSIControllerExpandVolumeResponse{}
 
 	logger().Info("expanding volume")
+	// This is the real work. The client RPC sends a gRPC to the controller plugin,
+	// then that controller may reach out to cloud APIs, etc.
 	err = v.srv.RPC(method, cReq, cResp)
 	if err != nil {
 		return err
