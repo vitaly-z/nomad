@@ -2282,5 +2282,6 @@
   {
     "title": "FAQ",
     "path": "faq"
-  }
+  },
+  { "title": "Nomad-Pack", "href": "/tools/nomad-pack/" }
 ]
