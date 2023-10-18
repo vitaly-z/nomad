@@ -326,6 +326,17 @@ integration-test: dev ## Run Nomad integration tests
 		-tags "$(GO_TAGS)" \
 		github.com/hashicorp/nomad/e2e/vaultcompat
 
+.PHONY: consul-integration-test
+consul-integration-test: dev ## Run Nomad integration tests
+	@echo "==> Running Nomad integration test suite for Consul:"
+	NOMAD_E2E_CONSULCOMPAT=1 go test \
+		-v \
+		-race \
+		-timeout=900s \
+		-count=1 \
+		-tags "$(GO_TAGS)" \
+		github.com/hashicorp/nomad/e2e/consulcompat
+
 .PHONY: clean
 clean: GOPATH=$(shell go env GOPATH)
 clean: ## Remove build artifacts
